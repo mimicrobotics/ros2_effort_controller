@@ -64,6 +64,7 @@ EffortControllerBase::on_init() {
     auto_declare<bool>("compensate_gravity", false);
     auto_declare<bool>("compensate_coriolis", false);
     auto_declare<double>("delta_tau_max", 1.0);
+    auto_declare<double>("effort_diff_max", 10.0);
 
     auto_declare<std::vector<std::string>>("joints",
                                            std::vector<std::string>());
@@ -233,6 +234,12 @@ EffortControllerBase::on_configure(
       m_joint_effort_limits(i) =
           robot_model.getJoint(m_joint_names[i])->limits->effort;
     }
+  }
+  m_effort_diff_max = get_node()->get_parameter("effort_diff_max").as_double();
+  if (m_effort_diff_max <= 0.0) {
+    RCLCPP_ERROR(get_node()->get_logger(), "effort_diff_max must be positive");
+    return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+        CallbackReturn::ERROR;
   }
 
   // Initialize solvers
@@ -437,7 +444,7 @@ void EffortControllerBase::computeJointEffortCmds(const ctrl::VectorND &tau) {
       std::terminate();
     }
     const double difference = tau[i] - m_efforts[i];
-    if (std::abs(difference) > 10.0) {
+    if (std::abs(difference) > m_effort_diff_max) {
       RCLCPP_WARN(get_node()->get_logger(),
                   "Joint %s effort large difference detected, was: %f, "
                   "desired: %f, difference: %f. Shutting down controller.",

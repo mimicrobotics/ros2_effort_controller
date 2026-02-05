@@ -238,7 +238,7 @@ private:
   // Effort limits
   KDL::JntArray m_joint_effort_limits;
   double m_delta_tau_max;
-
+  double m_effort_diff_max;
 };
 
 } // namespace effort_controller_base
