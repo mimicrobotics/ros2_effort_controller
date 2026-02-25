@@ -17,6 +17,7 @@ CartesianImpedanceController::on_init() {
   auto_declare<bool>("hand_frame_control", true);
   auto_declare<double>("nullspace_stiffness", 0.0);
   auto_declare<bool>("compensate_dJdq", false);
+  auto_declare<bool>("debug_topics", false);  // Publish additional topics for debugging
   auto_declare<std::vector<double>>("nullspace_desired_configuration",
                                     std::vector<double>());
 
@@ -150,6 +151,31 @@ CartesianImpedanceController::on_configure(
   m_data_impedance_publisher = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
       get_node()->get_name() + std::string("/data_impedance"), 1);
 
+
+  // Get debug topics parameter and create publishers
+  m_debug_topics = get_node()->get_parameter("debug_topics").as_bool();
+  RCLCPP_INFO(get_node()->get_logger(), "Publishing debug topics: %d",
+              m_debug_topics);
+
+  if (m_debug_topics) 
+  {
+    // Publish current target frame
+    target_pose_pub_ = get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
+        get_node()->get_name() + std::string("/debug_target_frame"), 10);
+
+    // Publish current end-effector frame
+    current_pose_pub_ = get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
+        get_node()->get_name() + std::string("/debug_current_frame"), 10);
+
+    // Publish clamped goal frame that the controller is actually trying to achieve (after error clamping)
+    next_goal_pose_pub_ = get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
+        get_node()->get_name() + std::string("/debug_next_goal_frame"), 10);
+
+    // Publish orientation error angle
+    angle_pub_ = get_node()->create_publisher<std_msgs::msg::Float64>(
+        get_node()->get_name() + std::string("/debug_orientation_error_angle"), 10);
+  }
+
   RCLCPP_INFO(get_node()->get_logger(), "Finished Impedance on_configure");
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::SUCCESS;
@@ -218,6 +244,31 @@ CartesianImpedanceController::update(const rclcpp::Time &time,
   return controller_interface::return_type::OK;
 }
 
+geometry_msgs::msg::PoseStamped toPoseStamped(
+    const KDL::Frame& frame,
+    const std::string& frame_id,
+    const rclcpp::Time& stamp)
+{
+  geometry_msgs::msg::PoseStamped msg;
+
+  msg.header.stamp = stamp;
+  msg.header.frame_id = frame_id;
+
+  msg.pose.position.x = frame.p.x();
+  msg.pose.position.y = frame.p.y();
+  msg.pose.position.z = frame.p.z();
+
+  double x, y, z, w;
+  frame.M.GetQuaternion(x, y, z, w);
+
+  msg.pose.orientation.x = x;
+  msg.pose.orientation.y = y;
+  msg.pose.orientation.z = z;
+  msg.pose.orientation.w = w;
+
+  return msg;
+}
+
 ctrl::Vector6D CartesianImpedanceController::computeMotionError() {
   // Compute the cartesian error between the current and the target frame
 
@@ -240,17 +291,38 @@ ctrl::Vector6D CartesianImpedanceController::computeMotionError() {
   // wrench.
   const double max_angle = 1.0;
   const double max_distance = 1.0;
-  angle = std::clamp(angle, -max_angle, max_angle);
+  double angle_clamped = std::clamp(angle, -max_angle, max_angle);
   distance = std::clamp(distance, -max_distance, max_distance);
 
   // Scale errors to allowed magnitudes
-  rot_axis = rot_axis * angle;
+  rot_axis = rot_axis * angle_clamped;
   error_kdl.p = error_kdl.p * distance;
 
   // Reassign values
   ctrl::Vector6D error;
   error.head<3>() << error_kdl.p.x(), error_kdl.p.y(), error_kdl.p.z();
   error.tail<3>() << rot_axis(0), rot_axis(1), rot_axis(2);
+
+  if (m_debug_topics)
+  {
+    KDL::Frame next_goal_frame;
+    next_goal_frame.M = KDL::Rotation::Rot(rot_axis, rot_axis.Norm()) * m_current_frame.M;
+    next_goal_frame.p = error_kdl.p + m_current_frame.p;
+
+    // Publish the target frame, current frame, and next goal frame for debugging
+    target_pose_pub_->publish(
+        toPoseStamped(m_target_frame, Base::m_robot_base_link, get_node()->now()));
+
+    current_pose_pub_->publish(
+        toPoseStamped(m_current_frame, Base::m_robot_base_link, get_node()->now()));
+
+    next_goal_pose_pub_->publish(
+        toPoseStamped(next_goal_frame, Base::m_robot_base_link, get_node()->now()));
+
+    std_msgs::msg::Float64 angle_msg;
+    angle_msg.data = angle;
+    angle_pub_->publish(angle_msg);
+  }
 
   return error;
 }

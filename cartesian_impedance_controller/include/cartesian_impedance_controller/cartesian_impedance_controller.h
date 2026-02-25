@@ -11,6 +11,7 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
+#include <std_msgs/msg/float64.hpp>
 
 #define DEBUG 0
 #if LOGGING
@@ -91,6 +92,12 @@ class CartesianImpedanceController
       m_ft_sensor_subscriber;
   rclcpp::Publisher<debug_msg::msg::Debug>::SharedPtr m_data_publisher;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr m_data_impedance_publisher;
+
+  // Debug publishers
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr current_pose_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr next_goal_pose_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr angle_pub_;
 #if LOGGING
   XBot::MatLogger2::Ptr m_logger;
 #endif
@@ -113,6 +120,7 @@ class CartesianImpedanceController
   double m_vel_old = 0.0;
   double current_acc_j0 = 0.0;
   bool m_compensate_dJdq = false;
+  bool m_debug_topics = false;
   /**
    * Allow users to choose whether to specify their target wrenches in the
    * end-effector frame (= True) or the base frame (= False). The first one
