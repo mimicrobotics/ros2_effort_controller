@@ -29,6 +29,16 @@ CartesianImpedanceController::on_init() {
   auto_declare<double>("stiffness.rot_x", default_rot_stiff);
   auto_declare<double>("stiffness.rot_y", default_rot_stiff);
   auto_declare<double>("stiffness.rot_z", default_rot_stiff);
+
+  // Disable integral gain by default to avoid windup issues, can be enabled with parameters
+  constexpr double default_lin_integral = 0.0;
+  constexpr double default_rot_integral = 0.0;
+  auto_declare<double>("integral_gain.trans_x", default_lin_integral);
+  auto_declare<double>("integral_gain.trans_y", default_lin_integral);
+  auto_declare<double>("integral_gain.trans_z", default_lin_integral);
+  auto_declare<double>("integral_gain.rot_x", default_rot_integral);
+  auto_declare<double>("integral_gain.rot_y", default_rot_integral);
+  auto_declare<double>("integral_gain.rot_z", default_rot_integral);
   auto_declare<double>("max_impedance_force", 70.0); // TODO
 
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
@@ -76,6 +86,16 @@ CartesianImpedanceController::on_configure(
   tmp[5] = 2 * sqrt(tmp[5]);
   
   m_cartesian_damping = tmp.asDiagonal();
+
+  // Set integral gain
+  tmp[0] = get_node()->get_parameter("integral_gain.trans_x").as_double();
+  tmp[1] = get_node()->get_parameter("integral_gain.trans_y").as_double();
+  tmp[2] = get_node()->get_parameter("integral_gain.trans_z").as_double();
+  tmp[3] = get_node()->get_parameter("integral_gain.rot_x").as_double();
+  tmp[4] = get_node()->get_parameter("integral_gain.rot_y").as_double();
+  tmp[5] = get_node()->get_parameter("integral_gain.rot_z").as_double();
+
+  m_cartesian_integral_gain = tmp.asDiagonal();
 
   m_max_impendance_force =
       get_node()->get_parameter("max_impedance_force").as_double(); // TODO
@@ -201,6 +221,7 @@ CartesianImpedanceController::on_activate(
   m_error_old = ctrl::Vector6D::Zero();
   m_error_dot_old = ctrl::Vector6D::Zero();
   m_target_velocity = ctrl::Vector6D::Zero();  
+  m_motion_error_integral = ctrl::Vector6D::Zero();
   m_last_time_target_frame_received = get_node()->now();
 
   m_target_wrench = ctrl::Vector6D::Zero();
@@ -377,10 +398,20 @@ ctrl::VectorND CartesianImpedanceController::computeTorque() {
   ctrl::Matrix6D K_d = base_link_stiffness;
   // Eigen::VectorXd damping_correction = 3.0 * Eigen::VectorXd::Ones(6);
   ctrl::Matrix6D D_d = compute_correct_damping(Lambda, K_d, std::sqrt(2.0)/2.0);
+  ctrl::Matrix6D K_d = m_cartesian_integral_gain;
+
+  m_motion_error_integral.head(3) << (m_motion_error_integral.head(3) + motion_error.head(3)).cwiseMax(-0.1).cwiseMin(0.1);
+  m_motion_error_integral.tail(3) << (m_motion_error_integral.tail(3) + motion_error.tail(3)).cwiseMax(-0.3).cwiseMin(0.3);
+
+  // Anti-windup: clamp the integral error to prevent excessive torques
+  m_motion_error_integral.head(3) << m_motion_error_integral.head(3).cwiseMax(-0.1).cwiseMin(0.1);
+  m_motion_error_integral.tail(3) << m_motion_error_integral.tail(3).cwiseMax(-0.2).cwiseMin(0.2);
 
   // D_d = Base::displayInBaseLink(m_cartesian_damping, Base::m_end_effector_link);
   ctrl::Vector6D stiffness_torque = jac.transpose() * (K_d * motion_error);
   ctrl::Vector6D damping_torque = jac.transpose() * (D_d * ( - jac * q_dot));
+  ctrl::Vector6D integral_torque = jac.transpose() * (Ki_ * m_motion_error_integral);
+
   // ctrl::Vector6D dot_error = 0.3 * m_dot_error_old + 0.7 * (motion_error - m_error_old) / 0.001;
 
   // // m_error_old = motion_error;
@@ -397,7 +428,7 @@ ctrl::VectorND CartesianImpedanceController::computeTorque() {
   //         << Base::displayInTipLink(force, Base::m_end_effector_link) << "\n Force in base frame: \n"
   //       );
   // Compute the task torque
-  tau_task = stiffness_torque + damping_torque;
+  tau_task = stiffness_torque + damping_torque + integral_torque;
 
   KDL::JntArray tau_coriolis(Base::m_joint_number),
       tau_gravity(Base::m_joint_number);

@@ -68,6 +68,7 @@ class CartesianImpedanceController
 
   ctrl::Matrix6D m_cartesian_stiffness;
   ctrl::Matrix6D m_cartesian_damping;
+  ctrl::Matrix6D m_cartesian_integral_gain;
   double m_null_space_stiffness;
   double m_null_space_damping;
   double m_max_impendance_force;
@@ -107,6 +108,7 @@ class CartesianImpedanceController
   ctrl::Vector6D m_error_old;
   ctrl::Vector6D m_error_dot_old;
   ctrl::Vector6D m_error_dot_dot_old;
+  ctrl::Vector6D m_motion_error_integral;
   std::string m_ft_sensor_ref_link;
   KDL::Frame m_ft_sensor_transform;
 
