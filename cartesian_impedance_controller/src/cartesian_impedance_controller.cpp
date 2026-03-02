@@ -398,20 +398,16 @@ ctrl::VectorND CartesianImpedanceController::computeTorque() {
   ctrl::Matrix6D K_d = base_link_stiffness;
   // Eigen::VectorXd damping_correction = 3.0 * Eigen::VectorXd::Ones(6);
   ctrl::Matrix6D D_d = compute_correct_damping(Lambda, K_d, std::sqrt(2.0)/2.0);
-  ctrl::Matrix6D K_d = m_cartesian_integral_gain;
-
-  m_motion_error_integral.head(3) << (m_motion_error_integral.head(3) + motion_error.head(3)).cwiseMax(-0.1).cwiseMin(0.1);
-  m_motion_error_integral.tail(3) << (m_motion_error_integral.tail(3) + motion_error.tail(3)).cwiseMax(-0.3).cwiseMin(0.3);
+  ctrl::Matrix6D K_i = m_cartesian_integral_gain;
 
   // Anti-windup: clamp the integral error to prevent excessive torques
-  m_motion_error_integral.head(3) << m_motion_error_integral.head(3).cwiseMax(-0.1).cwiseMin(0.1);
-  m_motion_error_integral.tail(3) << m_motion_error_integral.tail(3).cwiseMax(-0.2).cwiseMin(0.2);
+  m_motion_error_integral.head(3) << (m_motion_error_integral.head(3) + motion_error.head(3)).cwiseMax(-0.1).cwiseMin(0.1);
+  m_motion_error_integral.tail(3) << (m_motion_error_integral.tail(3) + motion_error.tail(3)).cwiseMax(-0.1).cwiseMin(0.1);
 
   // D_d = Base::displayInBaseLink(m_cartesian_damping, Base::m_end_effector_link);
   ctrl::Vector6D stiffness_torque = jac.transpose() * (K_d * motion_error);
   ctrl::Vector6D damping_torque = jac.transpose() * (D_d * ( - jac * q_dot));
-  ctrl::Vector6D integral_torque = jac.transpose() * (Ki_ * m_motion_error_integral);
-
+  ctrl::Vector6D integral_torque = jac.transpose() * (K_i * m_motion_error_integral);
   // ctrl::Vector6D dot_error = 0.3 * m_dot_error_old + 0.7 * (motion_error - m_error_old) / 0.001;
 
   // // m_error_old = motion_error;
