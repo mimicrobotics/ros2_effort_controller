@@ -605,31 +605,6 @@ void CartesianImpedanceController::ftSensorWrenchCallback(
   m_ft_sensor_wrench[4] = wrench->wrench.torque.y;
   m_ft_sensor_wrench[5] = wrench->wrench.torque.z;
 
-  // ---------------- Gravity compensation ----------------
-  // m_mass: mass of the attached object [kg]
-  // m_com: center of mass of the attached object in sensor frame [KDL::Vector]
-  double m_mass = 0.135617; // [kg]
-  if (m_mass > 0.0)
-  {
-    // Gravity in base frame
-    KDL::Vector gravity_base(0.0, 0.0, -9.8067); // [m/s^2]
-
-    // Mass initial offset in sensor frame
-    KDL::Vector F_offset(0.0, 0.0, m_mass * 9.8067); // [N]
-
-    // Rotate gravity to sensor frame using EE orientation
-    KDL::Rotation R_ee = m_current_frame.M; // rotation of EE in base frame
-    KDL::Vector gravity_sensor = R_ee.Inverse() * gravity_base;
-
-    // Force due to gravity
-    KDL::Vector F_gravity = m_mass * gravity_sensor;
-
-    // Subtract gravity effect from measured wrench
-    m_ft_sensor_wrench[0] -= F_gravity.x();
-    m_ft_sensor_wrench[1] -= F_gravity.y();
-    m_ft_sensor_wrench[2] -= F_gravity.z() - F_offset.z();
-  }
-
   // Check if the wrench is given in the base frame
   if (wrench->header.frame_id != Base::m_robot_base_link) {
     // Transform the wrench to the base frame
