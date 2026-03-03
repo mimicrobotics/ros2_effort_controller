@@ -71,6 +71,7 @@ class CartesianImpedanceController
   ctrl::Matrix6D m_cartesian_integral_gain;
   double m_null_space_stiffness;
   double m_null_space_damping;
+  double m_damping_ratio;
   double m_max_impendance_force;
   ctrl::Vector6D m_target_wrench;
 

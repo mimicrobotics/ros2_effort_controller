@@ -39,6 +39,7 @@ CartesianImpedanceController::on_init() {
   auto_declare<double>("integral_gain.rot_x", default_rot_integral);
   auto_declare<double>("integral_gain.rot_y", default_rot_integral);
   auto_declare<double>("integral_gain.rot_z", default_rot_integral);
+  auto_declare<double>("damping_ratio", std::sqrt(2.0)/2.0);
   auto_declare<double>("max_impedance_force", 70.0); // TODO
 
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
@@ -96,6 +97,7 @@ CartesianImpedanceController::on_configure(
   tmp[5] = get_node()->get_parameter("integral_gain.rot_z").as_double();
 
   m_cartesian_integral_gain = tmp.asDiagonal();
+  m_damping_ratio = get_node()->get_parameter("damping_ratio").as_double();
 
   m_max_impendance_force =
       get_node()->get_parameter("max_impedance_force").as_double(); // TODO
@@ -397,7 +399,7 @@ ctrl::VectorND CartesianImpedanceController::computeTorque() {
 
   ctrl::Matrix6D K_d = base_link_stiffness;
   // Eigen::VectorXd damping_correction = 3.0 * Eigen::VectorXd::Ones(6);
-  ctrl::Matrix6D D_d = compute_correct_damping(Lambda, K_d, std::sqrt(2.0)/2.0);
+  ctrl::Matrix6D D_d = compute_correct_damping(Lambda, K_d, m_damping_ratio);
   ctrl::Matrix6D K_i = m_cartesian_integral_gain;
 
   // Anti-windup: clamp the integral error to prevent excessive torques
