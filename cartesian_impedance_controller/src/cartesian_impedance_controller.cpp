@@ -173,6 +173,10 @@ CartesianImpedanceController::on_configure(
   m_data_impedance_publisher = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
       get_node()->get_name() + std::string("/data_impedance"), 1);
 
+   // Subscribe to heartbeat topic
+   m_heartbeat_subscriber = get_node()->create_subscription<std_msgs::msg::Bool>(
+       "collision_detection_heartbeat", 1,
+       std::bind(&CartesianImpedanceController::heartbeatCallback, this, std::placeholders::_1));
 
   // Get debug topics parameter and create publishers
   m_debug_topics = get_node()->get_parameter("debug_topics").as_bool();
@@ -228,6 +232,12 @@ CartesianImpedanceController::on_activate(
 
   m_target_wrench = ctrl::Vector6D::Zero();
   m_ft_sensor_wrench = ctrl::Vector6D::Zero();
+
+ std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+ last_heartbeat_time_ = get_node()->get_clock()->now();
+
+  // initialize controller state
+  controller_state = controller_interface::ControllerBase::ControllerState::RUNNING;
 #if LOGGING
   m_logger = XBot::MatLogger2::MakeLogger("/tmp/cart_impedance_log");
   m_logger->set_buffer_mode(XBot::VariableBuffer::Mode::circular_buffer);
@@ -650,6 +660,31 @@ void CartesianImpedanceController::targetFrameCallback(
   // m_target_frame_old = m_target_frame;
   m_target_velocity = ctrl::Vector6D::Zero();
   m_last_time_target_frame_received = get_node()->now();
+}
+
+void CartesianImpedanceController::heartbeatCallback(const std_msgs::msg::Bool::SharedPtr msg) {
+    bool is_now_safe = msg->data;
+
+    {
+      std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+      last_heartbeat_time_ = get_node()->get_clock()->now();
+
+        if (!initial_heartbeat_received_.load()) { // atomic read
+            initial_heartbeat_received_.store(true); // atomic write
+            RCLCPP_INFO(get_node()->get_logger(), "Initial collision detection heartbeat received. Controller operational.");
+        }
+    }
+
+    // atomically set is_safe_ value and get the previous value back.
+    bool was_safe = is_safe_.exchange(is_now_safe);
+
+    if (is_now_safe != was_safe) {
+        if (is_now_safe) {
+            RCLCPP_INFO(get_node()->get_logger(), "Controller state changed to SAFE (no collision).");
+        } else {
+            RCLCPP_WARN(get_node()->get_logger(), "Controller state changed to UNSAFE (collision detected).");
+        }
+    }
 }
 } // namespace cartesian_impedance_controller
 

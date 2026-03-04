@@ -3,6 +3,7 @@
 
 #include <effort_controller_base/effort_controller_base.h>
 
+#include <controller_interface/controller_base.h>
 #include <controller_interface/controller_interface.hpp>
 
 #include "controller_interface/controller_interface.hpp"
@@ -84,8 +85,12 @@ class CartesianImpedanceController
       const geometry_msgs::msg::WrenchStamped::SharedPtr wrench);
   void targetFrameCallback(
       const geometry_msgs::msg::PoseStamped::SharedPtr target);
+  void heartbeatCallback(const std_msgs::Bool::ConstPtr& msg);
   ctrl::Vector6D computeMotionError();
+  void freezeDesiredPoses();
 
+  rclcpp::Subscription<std_msgs::Bool>::SharedPtr
+      m_heartbeat_subscriber;
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr
       m_target_wrench_subscriber;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr
@@ -131,6 +136,15 @@ class CartesianImpedanceController
    * intuitive for tele-manipulation.
    */
   bool m_hand_frame_control;
+
+
+  controller_interface::ControllerBase::ControllerState controller_state{controller_interface::ControllerBase::ControllerState::STOPPED};
+  struct FrozenPose {
+    KDL::Frame pose;
+  };
+  FrozenPose frozen_pose;
+  std::atomic<bool> is_safe_{true}; ///< Safety flag (atomic for thread safety).
+  ros::Time last_heartbeat_time_;     ///< Timestamp of the last received heartbeat.
 
   rclcpp::Time m_last_time_target_frame_received;
 };
