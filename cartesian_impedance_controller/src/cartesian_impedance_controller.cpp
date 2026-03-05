@@ -233,11 +233,11 @@ CartesianImpedanceController::on_activate(
   m_target_wrench = ctrl::Vector6D::Zero();
   m_ft_sensor_wrench = ctrl::Vector6D::Zero();
 
- std::lock_guard<std::mutex> lock(heartbeat_mutex_);
- last_heartbeat_time_ = get_node()->get_clock()->now();
+ std::lock_guard<std::mutex> lock(heartbeat_mutex);
+ last_heartbeat_time = get_node()->get_clock()->now();
 
   // initialize controller state
-  controller_state = controller_interface::ControllerBase::ControllerState::RUNNING;
+  controller_state = ControllerState::RUNNING;
 #if LOGGING
   m_logger = XBot::MatLogger2::MakeLogger("/tmp/cart_impedance_log");
   m_logger->set_buffer_mode(XBot::VariableBuffer::Mode::circular_buffer);
@@ -308,33 +308,34 @@ geometry_msgs::msg::PoseStamped toPoseStamped(
 void CartesianImpedanceController::updateControllerState() {
   rclcpp::Time current_last_heartbeat_time;
   bool initial_heartbeat_was_received = false;
+  const auto time = get_node()->get_clock()->now();
 
   {
     // Read the flag and the time under the same lock to avoid race condition
-    std::lock_guard<std::mutex> lock(heartbeat_mutex_);
-    current_last_heartbeat_time = last_heartbeat_time_;
-    initial_heartbeat_was_received = initial_heartbeat_received_.load(); // atomic read
+    std::lock_guard<std::mutex> lock(heartbeat_mutex);
+    current_last_heartbeat_time = last_heartbeat_time;
+    initial_heartbeat_was_received = initial_heartbeat_received.load(); // atomic read
   }
   // Check heartbeat only if the initial one has been received
   if (initial_heartbeat_was_received) { // Use the value read under the lock
-     double time_diff = (time - current_last_heartbeat_time).toSec();
-      if (time_diff > 0.5 && is_safe_.load()) {
+     double time_diff = (time - current_last_heartbeat_time).seconds();
+      if (time_diff > 0.5 && is_safe.load()) {
            RCLCPP_INFO_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1.0, "Heartbeat timed out. Setting controller to UNSAFE. Current time: %f, Last heartbeat: %f",
-                    time.toSec(), current_last_heartbeat_time.toSec());
-            is_safe_.store(false); // atomic write
-            initial_heartbeat_received_.store(false);
+                    time.seconds(), current_last_heartbeat_time.seconds());
+            is_safe.store(false); // atomic write
+            initial_heartbeat_received.store(false);
       }
     }
 
-  if (!is_safe_.load() && controller_state == controller_interface::ControllerBase::ControllerState::RUNNING) {
-    controller_state = controller_interface::ControllerBase::ControllerState::STOPPED;
+  if (!is_safe.load() && controller_state == ControllerState::RUNNING) {
+    controller_state = ControllerState::STOPPED;
     freezeDesiredPoses();
     RCLCPP_INFO(get_node()->get_logger(), "Collision detected! Freezing current pose. Recycle e-stops and move arms into a non collision config to continue operation.");
   }
 
   // if  collision had occurred, we now enter a pending state to wait for recovery to finish.
-  if (is_safe_.load() && controller_state == controller_interface::ControllerBase::ControllerState::STOPPED) {
-    controller_state = controller_interface::ControllerBase::ControllerState::WAITING;
+  if (is_safe.load() && controller_state == ControllerState::STOPPED) {
+    controller_state = ControllerState::WAITING;
   }
 }
 
@@ -347,7 +348,7 @@ void CartesianImpedanceController::freezeDesiredPoses() {
 ctrl::Vector6D CartesianImpedanceController::computeMotionError() {
   // Compute the cartesian error between the current and the target frame
   KDL::Frame target_frame;
-  if (controller_state == controller_interface::ControllerBase::ControllerState::RUNNING) {
+  if (controller_state == ControllerState::RUNNING) {
       target_frame = m_target_frame;
   } else { // STOPPED or WAITING, use frozen poses
       target_frame = frozen_pose.pose;
@@ -673,7 +674,7 @@ void CartesianImpedanceController::ftSensorWrenchCallback(
 
 void CartesianImpedanceController::targetFrameCallback(
     const geometry_msgs::msg::PoseStamped::SharedPtr target) {
-  if (controller_state != controller_interface::ControllerBase::ControllerState::RUNNING) {
+  if (controller_state != ControllerState::RUNNING) {
     return; // Don't accept new poses while in a non-normal state
   }
   if (target->header.frame_id != Base::m_robot_base_link) {
@@ -717,17 +718,17 @@ void CartesianImpedanceController::heartbeatCallback(const std_msgs::msg::Bool::
     bool is_now_safe = msg->data;
 
     {
-      std::lock_guard<std::mutex> lock(heartbeat_mutex_);
-      last_heartbeat_time_ = get_node()->get_clock()->now();
+      std::lock_guard<std::mutex> lock(heartbeat_mutex);
+      last_heartbeat_time = get_node()->get_clock()->now();
 
-        if (!initial_heartbeat_received_.load()) { // atomic read
-            initial_heartbeat_received_.store(true); // atomic write
+        if (!initial_heartbeat_received.load()) { // atomic read
+            initial_heartbeat_received.store(true); // atomic write
             RCLCPP_INFO(get_node()->get_logger(), "Initial collision detection heartbeat received. Controller operational.");
         }
     }
 
-    // atomically set is_safe_ value and get the previous value back.
-    bool was_safe = is_safe_.exchange(is_now_safe);
+    // atomically set is_safe value and get the previous value back.
+    bool was_safe = is_safe.exchange(is_now_safe);
 
     if (is_now_safe != was_safe) {
         if (is_now_safe) {

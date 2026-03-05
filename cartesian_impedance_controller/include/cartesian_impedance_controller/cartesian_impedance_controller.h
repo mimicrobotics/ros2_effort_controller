@@ -1,10 +1,9 @@
 #ifndef EFFORT_IMPEDANCE_CONTROLLER_H_INCLUDED
 #define EFFORT_IMPEDANCE_CONTROLLER_H_INCLUDED
 
-#include <effort_controller_base/effort_controller_base.h>
+#include <mutex>
 
-#include <controller_interface/controller_base.h>
-#include <controller_interface/controller_interface.hpp>
+#include <effort_controller_base/effort_controller_base.h>
 
 #include "controller_interface/controller_interface.hpp"
 #include "debug_msg/msg/debug.hpp"
@@ -13,6 +12,7 @@
 #include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/bool.hpp>
 
 #define DEBUG 0
 #if LOGGING
@@ -87,11 +87,11 @@ class CartesianImpedanceController
       const geometry_msgs::msg::WrenchStamped::SharedPtr wrench);
   void targetFrameCallback(
       const geometry_msgs::msg::PoseStamped::SharedPtr target);
-  void heartbeatCallback(const std_msgs::Bool::ConstPtr& msg);
+  void heartbeatCallback(const std_msgs::msg::Bool::SharedPtr msg);
   ctrl::Vector6D computeMotionError();
   void freezeDesiredPoses();
 
-  rclcpp::Subscription<std_msgs::Bool>::SharedPtr
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr
       m_heartbeat_subscriber;
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr
       m_target_wrench_subscriber;
@@ -139,16 +139,22 @@ class CartesianImpedanceController
    */
   bool m_hand_frame_control;
 
+  enum ControllerState {
+    RUNNING,
+    WAITING,
+    STOPPED
+  };
 
-  controller_interface::ControllerBase::ControllerState controller_state{controller_interface::ControllerBase::ControllerState::STOPPED};
+  ControllerState controller_state{ControllerState::STOPPED};
   struct FrozenPose {
     KDL::Frame pose;
   };
   FrozenPose frozen_pose;
-  std::atomic<bool> is_safe_{true}; ///< Safety flag (atomic for thread safety).
-  ros::Time last_heartbeat_time_;     ///< Timestamp of the last received heartbeat.
-
+  std::atomic<bool> is_safe{true}; ///< Safety flag (atomic for thread safety).
+  rclcpp::Time last_heartbeat_time;     ///< Timestamp of the last received heartbeat.
+  std::mutex heartbeat_mutex; ///< Mutex to protect last_heartbeat_time_ access.
   rclcpp::Time m_last_time_target_frame_received;
+  std::atomic<bool> initial_heartbeat_received{false}; ///< Flag to indicate if the first heartbeat was received (atomic for thread safety).
 };
 
 }  // namespace cartesian_impedance_controller

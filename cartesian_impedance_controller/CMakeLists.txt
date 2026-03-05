@@ -21,6 +21,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(effort_controller_base REQUIRED)
 find_package(debug_msg REQUIRED)
+find_package(std_msgs REQUIRED)
 
 # Try to find MatLogger2 if logging is enabled
 if (LOGGING)
@@ -42,6 +43,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
         effort_controller_base
         Eigen3
         debug_msg
+	std_msgs
 )
 
 if (LOGGING_ENABLED)
