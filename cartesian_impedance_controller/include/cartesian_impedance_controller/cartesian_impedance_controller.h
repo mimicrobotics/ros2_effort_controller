@@ -63,6 +63,8 @@ class CartesianImpedanceController
   controller_interface::return_type update(
       const rclcpp::Time &time, const rclcpp::Duration &period) override;
 
+  void updateControllerState();
+
   ctrl::VectorND computeTorque();
 
   using Base = effort_controller_base::EffortControllerBase;

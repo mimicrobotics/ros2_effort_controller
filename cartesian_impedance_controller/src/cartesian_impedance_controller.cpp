@@ -265,6 +265,9 @@ CartesianImpedanceController::update(const rclcpp::Time &time,
   // Update joint states
   Base::updateJointStates();
 
+  // Update controller state based on heartbeat and collision detection
+  updateControllerState();
+
   // Compute the torque to applay at the joints
   ctrl::VectorND tau_tot = computeTorque();
 
@@ -302,14 +305,59 @@ geometry_msgs::msg::PoseStamped toPoseStamped(
   return msg;
 }
 
+void CartesianImpedanceController::updateControllerState() {
+  rclcpp::Time current_last_heartbeat_time;
+  bool initial_heartbeat_was_received = false;
+
+  {
+    // Read the flag and the time under the same lock to avoid race condition
+    std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+    current_last_heartbeat_time = last_heartbeat_time_;
+    initial_heartbeat_was_received = initial_heartbeat_received_.load(); // atomic read
+  }
+  // Check heartbeat only if the initial one has been received
+  if (initial_heartbeat_was_received) { // Use the value read under the lock
+     double time_diff = (time - current_last_heartbeat_time).toSec();
+      if (time_diff > 0.5 && is_safe_.load()) {
+           RCLCPP_INFO_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1.0, "Heartbeat timed out. Setting controller to UNSAFE. Current time: %f, Last heartbeat: %f",
+                    time.toSec(), current_last_heartbeat_time.toSec());
+            is_safe_.store(false); // atomic write
+            initial_heartbeat_received_.store(false);
+      }
+    }
+
+  if (!is_safe_.load() && controller_state == controller_interface::ControllerBase::ControllerState::RUNNING) {
+    controller_state = controller_interface::ControllerBase::ControllerState::STOPPED;
+    freezeDesiredPoses();
+    RCLCPP_INFO(get_node()->get_logger(), "Collision detected! Freezing current pose. Recycle e-stops and move arms into a non collision config to continue operation.");
+  }
+
+  // if  collision had occurred, we now enter a pending state to wait for recovery to finish.
+  if (is_safe_.load() && controller_state == controller_interface::ControllerBase::ControllerState::STOPPED) {
+    controller_state = controller_interface::ControllerBase::ControllerState::WAITING;
+  }
+}
+
+void CartesianImpedanceController::freezeDesiredPoses() {
+    // freeze arm pose with desired pose
+    frozen_pose.pose = m_current_frame;
+    RCLCPP_WARN(get_node()->get_logger(), "CONTROLLER STATE: STOPPED! Freezing desired poses. Waiting for E-Stop cycle to recover.");
+}
+
 ctrl::Vector6D CartesianImpedanceController::computeMotionError() {
   // Compute the cartesian error between the current and the target frame
+  KDL::Frame target_frame;
+  if (controller_state == controller_interface::ControllerBase::ControllerState::RUNNING) {
+      target_frame = m_target_frame;
+  } else { // STOPPED or WAITING, use frozen poses
+      target_frame = frozen_pose.pose;
+  }
 
   // Transformation from target -> current corresponds to error = target -
   // current
   KDL::Frame error_kdl;
-  error_kdl.M = m_target_frame.M * m_current_frame.M.Inverse();
-  error_kdl.p = m_target_frame.p - m_current_frame.p;
+  error_kdl.M = target_frame.M * m_current_frame.M.Inverse();
+  error_kdl.p = target_frame.p - m_current_frame.p;
 
   // Use Rodrigues Vector for a compact representation of orientation errors
   // Only for angles within [0,Pi)
@@ -625,6 +673,9 @@ void CartesianImpedanceController::ftSensorWrenchCallback(
 
 void CartesianImpedanceController::targetFrameCallback(
     const geometry_msgs::msg::PoseStamped::SharedPtr target) {
+  if (controller_state != controller_interface::ControllerBase::ControllerState::RUNNING) {
+    return; // Don't accept new poses while in a non-normal state
+  }
   if (target->header.frame_id != Base::m_robot_base_link) {
     auto &clock = *get_node()->get_clock();
     RCLCPP_WARN_THROTTLE(
