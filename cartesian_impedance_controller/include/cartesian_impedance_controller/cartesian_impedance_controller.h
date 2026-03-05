@@ -12,6 +12,7 @@
 #include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/bool.hpp>
 
 #define DEBUG 0
@@ -104,6 +105,7 @@ class CartesianImpedanceController
       m_ft_sensor_subscriber;
   rclcpp::Publisher<debug_msg::msg::Debug>::SharedPtr m_data_publisher;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr m_data_impedance_publisher;
+  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr m_robot_mode_publisher;
 
   // Debug publishers
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_;
@@ -184,6 +186,13 @@ class CartesianImpedanceController
     PAUSED = 2,
   };
 
+  enum class MimicRobotMode {
+    UNKNOWN = 0u,
+    IDLE = 1,
+    MOVE = 2,
+    USER_STOPPED = 3,
+  };
+
   static const char* toString(RobotMode mode);
   static const char* toString(SafetyMode mode);
   static const char* toString(ProgramMode mode);
@@ -192,6 +201,7 @@ class CartesianImpedanceController
   RobotMode robot_mode;
   SafetyMode safety_mode;
   ProgramMode program_mode;
+  MimicRobotMode mimic_robot_mode = MimicRobotMode::UNKNOWN;
 
   enum ControllerState {
     RUNNING,

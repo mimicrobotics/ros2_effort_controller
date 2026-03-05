@@ -181,6 +181,9 @@ CartesianImpedanceController::on_configure(
        "collision_detection_heartbeat", 1,
        std::bind(&CartesianImpedanceController::heartbeatCallback, this, std::placeholders::_1));
 
+  // Publisher for robot mode
+  m_robot_mode_publisher = get_node()->create_publisher<std_msgs::msg::Int32>(get_node()->get_name() + std::string("/robot_mode"), 1);
+
   // Get debug topics parameter and create publishers
   m_debug_topics = get_node()->get_parameter("debug_topics").as_bool();
   RCLCPP_INFO(get_node()->get_logger(), "Publishing debug topics: %d",
@@ -253,6 +256,7 @@ CartesianImpedanceController::on_activate(
 
   // initialize controller state
   controller_state = ControllerState::RUNNING;
+  mimic_robot_mode = MimicRobotMode::MOVE;
 #if LOGGING
   m_logger = XBot::MatLogger2::MakeLogger("/tmp/cart_impedance_log");
   m_logger->set_buffer_mode(XBot::VariableBuffer::Mode::circular_buffer);
@@ -365,6 +369,7 @@ void CartesianImpedanceController::updateControllerState() {
 
   if (!is_safe.load() || robot_mode != RobotMode::RUNNING || safety_mode != SafetyMode::NORMAL || program_mode != ProgramMode::PLAYING) {
     freezeDesiredPoses();
+    mimic_robot_mode = MimicRobotMode::USER_STOPPED;
   }
 
   // if  collision had occurred, we now enter a pending state to wait for recovery to finish.
@@ -375,10 +380,14 @@ void CartesianImpedanceController::updateControllerState() {
   if (controller_state == ControllerState::WAITING && is_safe.load() && robot_mode == RobotMode::RUNNING && safety_mode == SafetyMode::NORMAL && program_mode == ProgramMode::PLAYING) {
     RCLCPP_INFO(get_node()->get_logger(), "Robot in back in safe remote control state. Resuming...");
     controller_state = ControllerState::RUNNING;
+    mimic_robot_mode = MimicRobotMode::MOVE;
   }
+
+  // Publish mimic robot mode for high level components as well
+  std_msgs::msg::Int32 mode_msg;
+  mode_msg.data = static_cast<int>(mimic_robot_mode);
+  m_robot_mode_publisher->publish(mode_msg);
 }
-
-
 
 void CartesianImpedanceController::updateRobotState()
 {
@@ -402,6 +411,8 @@ void CartesianImpedanceController::updateRobotState()
 void CartesianImpedanceController::freezeDesiredPoses() {
     // freeze arm pose with desired pose
     frozen_pose.pose = m_current_frame;
+    m_target_frame = m_current_frame;
+    m_motion_error_integral = ctrl::Vector6D::Zero();
 }
 
 ctrl::Vector6D CartesianImpedanceController::computeMotionError() {
@@ -521,8 +532,8 @@ ctrl::VectorND CartesianImpedanceController::computeTorque() {
   ctrl::Matrix6D K_i = m_cartesian_integral_gain;
 
   // Anti-windup: clamp the integral error to prevent excessive torques
-  m_motion_error_integral.head(3) << (m_motion_error_integral.head(3) + motion_error.head(3)).cwiseMax(-0.1).cwiseMin(0.1);
-  m_motion_error_integral.tail(3) << (m_motion_error_integral.tail(3) + motion_error.tail(3)).cwiseMax(-0.1).cwiseMin(0.1);
+  m_motion_error_integral.head(3) << (m_motion_error_integral.head(3) + 0.1 * motion_error.head(3)).cwiseMax(-0.1).cwiseMin(0.1);
+  m_motion_error_integral.tail(3) << (m_motion_error_integral.tail(3) + 0.1 * motion_error.tail(3)).cwiseMax(-0.05).cwiseMin(0.05);
 
   // D_d = Base::displayInBaseLink(m_cartesian_damping, Base::m_end_effector_link);
   ctrl::Vector6D stiffness_torque = jac.transpose() * (K_d * motion_error);
@@ -736,6 +747,7 @@ void CartesianImpedanceController::targetFrameCallback(
   if (controller_state != ControllerState::RUNNING) {
     return; // Don't accept new poses while in a non-normal state
   }
+
   if (target->header.frame_id != Base::m_robot_base_link) {
     auto &clock = *get_node()->get_clock();
     RCLCPP_WARN_THROTTLE(
