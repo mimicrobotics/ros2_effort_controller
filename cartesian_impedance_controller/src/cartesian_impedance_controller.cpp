@@ -13,6 +13,7 @@ CartesianImpedanceController::on_init() {
     return ret;
   }
 
+  auto_declare<std::string>("tf_prefix", "");
   auto_declare<std::string>("ft_sensor_ref_link", "");
   auto_declare<bool>("hand_frame_control", true);
   auto_declare<double>("nullspace_stiffness", 0.0);
@@ -54,6 +55,8 @@ CartesianImpedanceController::on_configure(
                  CallbackReturn::SUCCESS) {
     return ret;
   }
+
+  tf_prefix = get_node()->get_parameter("tf_prefix").as_string();
 
   // Make sure sensor link is part of the robot chain
   m_ft_sensor_ref_link =
@@ -207,6 +210,18 @@ CartesianImpedanceController::on_configure(
       CallbackReturn::SUCCESS;
 }
 
+controller_interface::InterfaceConfiguration
+CartesianImpedanceController::state_interface_configuration() const {
+  controller_interface::InterfaceConfiguration conf = EffortControllerBase::state_interface_configuration();
+  conf.names.emplace_back(tf_prefix + "gpio/robot_mode");
+  conf.names.emplace_back(tf_prefix + "gpio/safety_mode");
+  conf.names.emplace_back(tf_prefix + "gpio/program_running");
+ // RCLCPP_INFO(get_node()->get_logger(), tf_prefix.c_str());
+ // RCLCPP_INFO(get_node()->get_logger(), std::to_string(conf.names.size()).c_str());
+  return conf;
+}
+
+
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
 CartesianImpedanceController::on_activate(
     const rclcpp_lifecycle::State &previous_state) {
@@ -268,6 +283,9 @@ CartesianImpedanceController::update(const rclcpp::Time &time,
   // Update controller state based on heartbeat and collision detection
   updateControllerState();
 
+  // Update current program / safety / arm state from the controller
+  updateRobotState();
+
   // Compute the torque to applay at the joints
   ctrl::VectorND tau_tot = computeTorque();
 
@@ -326,23 +344,64 @@ void CartesianImpedanceController::updateControllerState() {
             initial_heartbeat_received.store(false);
       }
     }
+  if (controller_state == ControllerState::RUNNING) {
+    if (!is_safe.load()) {
+      controller_state = ControllerState::STOPPED;
+      RCLCPP_INFO(get_node()->get_logger(), "Collision detected! Freezing current pose. Recycle e-stops and move arms into a non collision config to continue operation.");
+    }
+    else if (robot_mode != RobotMode::RUNNING) {
+      controller_state = ControllerState::STOPPED;
+      RCLCPP_INFO(get_node()->get_logger(), "Robot not running!");
+    }
+    else if (safety_mode != SafetyMode::NORMAL) {
+      controller_state = ControllerState::STOPPED;
+      RCLCPP_INFO(get_node()->get_logger(), "Safety mode not normal!");
+    }
+    else if (program_mode != ProgramMode::PLAYING) {
+      controller_state = ControllerState::STOPPED;
+      RCLCPP_INFO(get_node()->get_logger(), "Program not playing!");
+    }
+  }
 
-  if (!is_safe.load() && controller_state == ControllerState::RUNNING) {
-    controller_state = ControllerState::STOPPED;
+  if (!is_safe.load() || robot_mode != RobotMode::RUNNING || safety_mode != SafetyMode::NORMAL || program_mode != ProgramMode::PLAYING) {
     freezeDesiredPoses();
-    RCLCPP_INFO(get_node()->get_logger(), "Collision detected! Freezing current pose. Recycle e-stops and move arms into a non collision config to continue operation.");
   }
 
   // if  collision had occurred, we now enter a pending state to wait for recovery to finish.
   if (is_safe.load() && controller_state == ControllerState::STOPPED) {
     controller_state = ControllerState::WAITING;
   }
+
+  if (controller_state == ControllerState::WAITING && is_safe.load() && robot_mode == RobotMode::RUNNING && safety_mode == SafetyMode::NORMAL && program_mode == ProgramMode::PLAYING) {
+    RCLCPP_INFO(get_node()->get_logger(), "Robot in back in safe remote control state. Resuming...");
+    controller_state = ControllerState::RUNNING;
+  }
+}
+
+
+
+void CartesianImpedanceController::updateRobotState()
+{
+  const auto robot_mode_new = static_cast<RobotMode>(state_interfaces_[static_cast<uint32_t>(StateInterfaces::ROBOT_MODE)].get_value());
+  if (robot_mode_new != robot_mode) {
+    robot_mode = robot_mode_new;
+    RCLCPP_INFO(get_node()->get_logger(), "Robot mode switched to: %s", toString(robot_mode));
+  }
+  const auto safety_mode_new = static_cast<SafetyMode>(state_interfaces_[static_cast<uint32_t>(StateInterfaces::SAFETY_MODE)].get_value());
+  if (safety_mode_new != safety_mode) {
+    safety_mode = safety_mode_new;
+    RCLCPP_INFO(get_node()->get_logger(), "Safety mode switched to: %s", toString(safety_mode));
+  }
+  const auto program_mode_new = static_cast<ProgramMode>(state_interfaces_[static_cast<uint32_t>(StateInterfaces::PROGRAM_RUNNING)].get_value());
+  if (program_mode_new != program_mode) {
+    program_mode = program_mode_new;
+    RCLCPP_INFO(get_node()->get_logger(), "Program mode switched to: %s", toString(program_mode));
+  }
 }
 
 void CartesianImpedanceController::freezeDesiredPoses() {
     // freeze arm pose with desired pose
     frozen_pose.pose = m_current_frame;
-    RCLCPP_WARN(get_node()->get_logger(), "CONTROLLER STATE: STOPPED! Freezing desired poses. Waiting for E-Stop cycle to recover.");
 }
 
 ctrl::Vector6D CartesianImpedanceController::computeMotionError() {
@@ -393,7 +452,7 @@ ctrl::Vector6D CartesianImpedanceController::computeMotionError() {
 
     // Publish the target frame, current frame, and next goal frame for debugging
     target_pose_pub_->publish(
-        toPoseStamped(m_target_frame, Base::m_robot_base_link, get_node()->now()));
+        toPoseStamped(target_frame, Base::m_robot_base_link, get_node()->now()));
 
     current_pose_pub_->publish(
         toPoseStamped(m_current_frame, Base::m_robot_base_link, get_node()->now()));
@@ -738,6 +797,49 @@ void CartesianImpedanceController::heartbeatCallback(const std_msgs::msg::Bool::
         }
     }
 }
+  const char* CartesianImpedanceController::toString(RobotMode mode) {
+    switch (mode) {
+      case RobotMode::NO_CONTROLLER:       return "NO_CONTROLLER";
+      case RobotMode::DISCONNECTED:        return "DISCONNECTED";
+      case RobotMode::CONFIRM_SAFETY:      return "CONFIRM_SAFETY";
+      case RobotMode::BOOTING:             return "BOOTING";
+      case RobotMode::POWER_OFF:           return "POWER_OFF";
+      case RobotMode::POWER_ON:            return "POWER_ON";
+      case RobotMode::IDLE:                return "IDLE";
+      case RobotMode::BACKDRIVE:           return "BACKDRIVE";
+      case RobotMode::RUNNING:             return "RUNNING";
+      case RobotMode::UPDATING_FIRMWARE:   return "UPDATING_FIRMWARE";
+      default:                             return "UNKNOWN_ROBOT_MODE";
+    }
+  }
+
+  const char* CartesianImpedanceController::toString(SafetyMode mode) {
+    switch (mode) {
+      case SafetyMode::NORMAL:                               return "NORMAL";
+      case SafetyMode::REDUCED:                              return "REDUCED";
+      case SafetyMode::PROTECTIVE_STOP:                      return "PROTECTIVE_STOP";
+      case SafetyMode::RECOVERY:                             return "RECOVERY";
+      case SafetyMode::SAFEGUARD_STOP:                       return "SAFEGUARD_STOP";
+      case SafetyMode::SYSTEM_EMERGENCY_STOP:                return "SYSTEM_EMERGENCY_STOP";
+      case SafetyMode::ROBOT_EMERGENCY_STOP:                 return "ROBOT_EMERGENCY_STOP";
+      case SafetyMode::VIOLATION:                            return "VIOLATION";
+      case SafetyMode::FAULT:                                return "FAULT";
+      case SafetyMode::VALIDATE_JOINT_ID:                    return "VALIDATE_JOINT_ID";
+      case SafetyMode::UNDEFINED_SAFETY_MODE:                return "UNDEFINED_SAFETY_MODE";
+      case SafetyMode::AUTOMATIC_MODE_SAFEGUARD_STOP:        return "AUTOMATIC_MODE_SAFEGUARD_STOP";
+      case SafetyMode::SYSTEM_THREE_POSITION_ENABLING_STOP:  return "SYSTEM_THREE_POSITION_ENABLING_STOP";
+      default:                                               return "UNKNOWN_SAFETY_MODE";
+    }
+  }
+
+  const char* CartesianImpedanceController::toString(ProgramMode mode) {
+    switch (mode) {
+      case ProgramMode::STOPPED:  return "STOPPED";
+      case ProgramMode::PLAYING:  return "PLAYING";
+      case ProgramMode::PAUSED:   return "PAUSED";
+      default:                    return "UNKNOWN_PROGRAM_MODE";
+    }
+  }
 } // namespace cartesian_impedance_controller
 
 // Pluginlib
