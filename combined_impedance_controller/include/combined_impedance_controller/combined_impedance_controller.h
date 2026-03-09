@@ -12,10 +12,11 @@
 #include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
-#include "std_srvs/SetBool.h"
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/int32.hpp>
+#include <std_srvs/srv/set_bool.hpp>
 
 #define DEBUG 0
 #if LOGGING
@@ -88,9 +89,9 @@ public:
   // ================================================
   // = Config variables for joint impedance control =
   // ================================================
-  const ctrl::MatrixND m_joint_stiffness;
-  const ctrl::MatrixND m_joint_damping;
-  const ctrl::MatrixND m_joint_integral_gain;
+  ctrl::MatrixND m_joint_stiffness;
+  ctrl::MatrixND m_joint_damping;
+  ctrl::MatrixND m_joint_integral_gain;
 
   // ===========================
   // = Common config variables =
@@ -137,16 +138,17 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr angle_pub_;
 
   // Controller mode service (replaces topic-based mode switching)
-  ros::ServiceServer mode_switch_srv_;
-  bool modeSwitchCallback(std_srvs::SetBool::Request &req,
-                          std_srvs::SetBool::Response &res);
+  rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr mode_switch_srv_;
+  bool modeSwitchCallback(std_srvs::srv::SetBool::Request::SharedPtr req,
+                          std_srvs::srv::SetBool::Response::SharedPtr res);
 
   // Mode heartbeat (received from Python while in JOINT_TRAJECTORY)
-  ros::Subscriber mode_heartbeat_sub_;
-  void modeHeartbeatCallback(const std_msgs::Empty::ConstPtr &msg);
-  ros::Time last_mode_heartbeat_time_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr mode_heartbeat_sub_;
+  void modeHeartbeatCallback(const std_msgs::msg::Empty::SharedPtr msg);
+  rclcpp::Time last_mode_heartbeat_time_;
   std::mutex mode_heartbeat_mutex_;
   std::atomic<bool> mode_heartbeat_received_{false};
+  std::mutex traj_mutex_; ///< Guards traj_* and control_mode_.
   static constexpr double kModeHeartbeatTimeout{0.3}; ///< 300ms watchdog.
 
 #if LOGGING

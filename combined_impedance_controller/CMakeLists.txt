@@ -22,6 +22,8 @@ find_package(rclcpp REQUIRED)
 find_package(effort_controller_base REQUIRED)
 find_package(debug_msg REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 
 # Try to find MatLogger2 if logging is enabled
 if (LOGGING)
@@ -44,6 +46,8 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
         Eigen3
         debug_msg
 	std_msgs
+	std_srvs
+	sensor_msgs
 )
 
 if (LOGGING_ENABLED)
@@ -86,7 +90,7 @@ endif()
 # Install and export
 #--------------------------------------------------------------------------------
 
-pluginlib_export_plugin_description_file(controller_interface combined_impedance_controller.xml)
+pluginlib_export_plugin_description_file(controller_interface combined_impedance_controller_plugin.xml)
 
 install(
   DIRECTORY include/
