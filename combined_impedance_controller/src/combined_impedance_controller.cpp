@@ -227,6 +227,20 @@ CombinedImpedanceController::on_configure(
   m_robot_mode_publisher = get_node()->create_publisher<std_msgs::msg::Int32>(
       get_node()->get_name() + std::string("/robot_mode"), 1);
 
+  // Service for controller mode switching (replaces topic-based mode command)
+  mode_switch_srv_ = get_node()->create_service<std_srvs::srv::SetBool>(
+      get_node()->get_name() + std::string("/controller_mode_switch"),
+      std::bind(&CombinedImpedanceController::modeSwitchCallback, this,
+                std::placeholders::_1, std::placeholders::_2));
+  RCLCPP_INFO(get_node()->get_logger(),
+              "CombinedImpedanceController: Mode switch service ready.");
+
+  // Heartbeat subscriber for JOINT_TRAJECTORY watchdog
+  mode_heartbeat_sub_ = get_node()->subscribe(
+      get_node()->get_name() + std::string("/mode_heartbeat"), 1,
+      &CombinedImpedanceController::modeHeartbeatCallback, this,
+      ros::TransportHints().reliable().tcpNoDelay());
+
   // Get debug topics parameter and create publishers
   m_debug_topics = get_node()->get_parameter("debug_topics").as_bool();
   RCLCPP_INFO(get_node()->get_logger(), "Publishing debug topics: %d",
@@ -594,6 +608,30 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
   tau_null.setZero();
 
   if (control_mode == ControlMode::JOINT) {
+    // ── Mode heartbeat watchdog ──────────────────────────────────────────
+    // If in JOINT and heartbeat is lost for >200ms, auto-revert
+    // to CARTESIAN. Lock ordering: mode_heartbeat_mutex_ first, then
+    // traj_mutex_ (never nested the other way) to avoid deadlock.
+    bool mode_hb_timed_out = false;
+    {
+      std::lock_guard<std::mutex> mhb_lock(mode_heartbeat_mutex_);
+      if (mode_heartbeat_received_.load()) {
+        double mode_hb_diff = (time - last_mode_heartbeat_time_).toSec();
+        if (mode_hb_diff > kModeHeartbeatTimeout) {
+          mode_hb_timed_out = true;
+        }
+      }
+    }
+    if (mode_hb_timed_out) {
+      std::lock_guard<std::mutex> tlock(traj_mutex_);
+      control_mode = ControlMode::CARTESIAN;
+      mode_heartbeat_received_.store(false);
+      RCLCPP_ERROR(get_node()->get_logger(),
+                   "CombinedImpedanceController: Mode heartbeat timeout. "
+                   "Auto-switching to CARTESIAN.");
+      freezeDesiredPoses();
+    }
+
     // Compute the motion error
     const ctrl::VectorND motion_error = computeJointMotionError();
     // Compute the stiffness and damping in the joint space
@@ -877,6 +915,55 @@ void CombinedImpedanceController::targetJointsCallback(
       }
     }
   }
+
+  bool CombinedImpedanceController::modeSwitchCallback(
+      std_srvs::SetBool::Request & req, std_srvs::SetBool::Response & res) {
+    std::lock_guard<std::mutex> lock(traj_mutex_);
+
+    if (req.data) {
+      // Request JOINT_TRAJECTORY
+      if (control_mode == ControlMode::JOINT) {
+        res.success = true;
+        res.message = "Already in JOINT mode.";
+        return true;
+      }
+      // Switch CARTESIAN -> JOINT
+      freezeDesiredPoses();
+      control_mode = Mode::JOINT;
+      // Start the watchdog clock.
+      {
+        std::lock_guard<std::mutex> hb_lock(mode_heartbeat_mutex_);
+        last_mode_heartbeat_time_ = ros::Time::now();
+        mode_heartbeat_received_.store(true);
+      }
+      RCLCPP_INFO(
+          get_node()->get_logger(),
+          "CombinedImpedanceController: Switched to JOINT mode (via service).");
+      res.success = true;
+      res.message = "Switched to JOINT mode.";
+    } else {
+      // Switch JOINT -> CARTESIAN
+      control_mode = ControlMode::CARTESIAN;
+      mode_heartbeat_received_.store(false);
+      RCLCPP_INFO(get_node()->get_logger(),
+                  "CombinedImpedanceController: Switched to CARTESIAN mode "
+                  "(via service).");
+      freezeDesiredPoses();
+      res.success = true;
+      res.message = "Switched to CARTESIAN mode.";
+    }
+    return true;
+  }
+
+  void CombinedImpedanceController::modeHeartbeatCallback(
+      const std_msgs::Empty::ConstPtr & /*msg*/) {
+    std::lock_guard<std::mutex> lock(mode_heartbeat_mutex_);
+    last_mode_heartbeat_time_ = ros::Time::now();
+    if (!mode_heartbeat_received_.load()) {
+      mode_heartbeat_received_.store(true);
+    }
+  }
+
   const char *CombinedImpedanceController::toString(RobotMode mode) {
     switch (mode) {
     case RobotMode::NO_CONTROLLER:

@@ -12,6 +12,7 @@
 #include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
+#include "std_srvs/SetBool.h"
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/int32.hpp>
@@ -134,6 +135,20 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr
       next_goal_pose_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr angle_pub_;
+
+  // Controller mode service (replaces topic-based mode switching)
+  ros::ServiceServer mode_switch_srv_;
+  bool modeSwitchCallback(std_srvs::SetBool::Request &req,
+                          std_srvs::SetBool::Response &res);
+
+  // Mode heartbeat (received from Python while in JOINT_TRAJECTORY)
+  ros::Subscriber mode_heartbeat_sub_;
+  void modeHeartbeatCallback(const std_msgs::Empty::ConstPtr &msg);
+  ros::Time last_mode_heartbeat_time_;
+  std::mutex mode_heartbeat_mutex_;
+  std::atomic<bool> mode_heartbeat_received_{false};
+  static constexpr double kModeHeartbeatTimeout{0.3}; ///< 300ms watchdog.
+
 #if LOGGING
   XBot::MatLogger2::Ptr m_logger;
 #endif
