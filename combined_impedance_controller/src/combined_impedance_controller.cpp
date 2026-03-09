@@ -24,24 +24,28 @@ CombinedImpedanceController::on_init() {
 
   constexpr double default_lin_stiff = 500.0;
   constexpr double default_rot_stiff = 50.0;
-  auto_declare<double>("stiffness.trans_x", default_lin_stiff);
-  auto_declare<double>("stiffness.trans_y", default_lin_stiff);
-  auto_declare<double>("stiffness.trans_z", default_lin_stiff);
-  auto_declare<double>("stiffness.rot_x", default_rot_stiff);
-  auto_declare<double>("stiffness.rot_y", default_rot_stiff);
-  auto_declare<double>("stiffness.rot_z", default_rot_stiff);
+  auto_declare<double>("cart_stiffness.trans_x", default_lin_stiff);
+  auto_declare<double>("cart_stiffness.trans_y", default_lin_stiff);
+  auto_declare<double>("cart_stiffness.trans_z", default_lin_stiff);
+  auto_declare<double>("cart_stiffness.rot_x", default_rot_stiff);
+  auto_declare<double>("cart_stiffness.rot_y", default_rot_stiff);
+  auto_declare<double>("cart_stiffness.rot_z", default_rot_stiff);
+  auto_declare<std::vector<double>>("joint_stiffness", std::vector<double>());
 
   // Disable integral gain by default to avoid windup issues, can be enabled with parameters
   constexpr double default_lin_integral = 0.0;
   constexpr double default_rot_integral = 0.0;
-  auto_declare<double>("integral_gain.trans_x", default_lin_integral);
-  auto_declare<double>("integral_gain.trans_y", default_lin_integral);
-  auto_declare<double>("integral_gain.trans_z", default_lin_integral);
-  auto_declare<double>("integral_gain.rot_x", default_rot_integral);
-  auto_declare<double>("integral_gain.rot_y", default_rot_integral);
-  auto_declare<double>("integral_gain.rot_z", default_rot_integral);
-  auto_declare<double>("damping_ratio", std::sqrt(2.0)/2.0);
-  auto_declare<double>("max_impedance_force", 70.0); // TODO
+  auto_declare<double>("cart_integral_gain.trans_x", default_lin_integral);
+  auto_declare<double>("cart_integral_gain.trans_y", default_lin_integral);
+  auto_declare<double>("cart_integral_gain.trans_z", default_lin_integral);
+  auto_declare<double>("cart_integral_gain.rot_x", default_rot_integral);
+  auto_declare<double>("cart_integral_gain.rot_y", default_rot_integral);
+  auto_declare<double>("cart_integral_gain.rot_z", default_rot_integral);
+  auto_declare<double>("cart_damping_ratio", std::sqrt(2.0)/2.0);
+  auto_declare<std::vector<double>>("joint_integral_gain", std::vector<double>());
+
+  // Define upper limit for impedance forces
+  auto_declare<double>("max_impedance_force", 70.0);
 
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::SUCCESS;
@@ -70,18 +74,18 @@ CombinedImpedanceController::on_configure(
     return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
         CallbackReturn::ERROR;
   }
-  // Set stiffness
+  // Set cartesian stiffness
   ctrl::Vector6D tmp;
-  tmp[0] = get_node()->get_parameter("stiffness.trans_x").as_double();
-  tmp[1] = get_node()->get_parameter("stiffness.trans_y").as_double();
-  tmp[2] = get_node()->get_parameter("stiffness.trans_z").as_double();
-  tmp[3] = get_node()->get_parameter("stiffness.rot_x").as_double();
-  tmp[4] = get_node()->get_parameter("stiffness.rot_y").as_double();
-  tmp[5] = get_node()->get_parameter("stiffness.rot_z").as_double();
+  tmp[0] = get_node()->get_parameter("cart_stiffness.trans_x").as_double();
+  tmp[1] = get_node()->get_parameter("cart_stiffness.trans_y").as_double();
+  tmp[2] = get_node()->get_parameter("cart_stiffness.trans_z").as_double();
+  tmp[3] = get_node()->get_parameter("cart_stiffness.rot_x").as_double();
+  tmp[4] = get_node()->get_parameter("cart_stiffness.rot_y").as_double();
+  tmp[5] = get_node()->get_parameter("cart_stiffness.rot_z").as_double();
 
   m_cartesian_stiffness = tmp.asDiagonal();
 
-  // Set damping
+  // Set cartesian damping
   tmp[0] = 2 * sqrt(tmp[0]);
   tmp[1] = 2 * sqrt(tmp[1]);
   tmp[2] = 2 * sqrt(tmp[2]);
@@ -91,16 +95,53 @@ CombinedImpedanceController::on_configure(
   
   m_cartesian_damping = tmp.asDiagonal();
 
-  // Set integral gain
-  tmp[0] = get_node()->get_parameter("integral_gain.trans_x").as_double();
-  tmp[1] = get_node()->get_parameter("integral_gain.trans_y").as_double();
-  tmp[2] = get_node()->get_parameter("integral_gain.trans_z").as_double();
-  tmp[3] = get_node()->get_parameter("integral_gain.rot_x").as_double();
-  tmp[4] = get_node()->get_parameter("integral_gain.rot_y").as_double();
-  tmp[5] = get_node()->get_parameter("integral_gain.rot_z").as_double();
+  // Set cartesian integral gain
+  tmp[0] = get_node()->get_parameter("cart_integral_gain.trans_x").as_double();
+  tmp[1] = get_node()->get_parameter("cart_integral_gain.trans_y").as_double();
+  tmp[2] = get_node()->get_parameter("cart_integral_gain.trans_z").as_double();
+  tmp[3] = get_node()->get_parameter("cart_integral_gain.rot_x").as_double();
+  tmp[4] = get_node()->get_parameter("cart_integral_gain.rot_y").as_double();
+  tmp[5] = get_node()->get_parameter("cart_integral_gain.rot_z").as_double();
 
   m_cartesian_integral_gain = tmp.asDiagonal();
-  m_damping_ratio = get_node()->get_parameter("damping_ratio").as_double();
+  m_damping_ratio = get_node()->get_parameter("cart_damping_ratio").as_double();
+
+  // Set joint stiffness
+  const std::vector<double> joint_stiffness =
+        get_node()
+            ->get_parameter("joint_stiffness")
+            .as_double_array();
+  if (joint_stiffness.size() != Base::m_joint_number) {
+    RCLCPP_ERROR(get_node()->get_logger(),
+                  "Joint stiffness configuration size does not match joint number: "
+                  "%zu != %zu",
+                  joint_stiffness.size(), Base::m_joint_number);
+    return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+        CallbackReturn::ERROR;
+  }
+  m_joint_stiffness = joint_stiffness.asDiagonal();
+  for (size_t i = 0; i < Base::m_joint_number; ++i) {
+    m_joint_stiffness(i) = joint_stiffness[i];
+  }
+  RCLCPP_INFO_STREAM(get_node()->get_logger(),
+    "Joint stiffness: " << m_joint_stiffness.transpose());
+
+  // Set joint integral gain
+  const std::vector<double> joint_integral_gain =
+        get_node()
+            ->get_parameter("joint_integral_gain")
+            .as_double_array();
+  if (joint_integral_gain.size() != Base::m_joint_number) {
+    RCLCPP_ERROR(get_node()->get_logger(),
+                  "Joint integral gain configuration size does not match joint number: "
+                  "%zu != %zu",
+                  joint_stiffness.size(), Base::m_joint_number);
+    return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+        CallbackReturn::ERROR;
+  }
+  m_joint_integral_gain = joint_integral_gain.asDiagonal();
+  RCLCPP_INFO_STREAM(get_node()->get_logger(),
+    "Joint stiffness: " << m_joint_integral_gain.transpose());
 
   m_max_impendance_force =
       get_node()->get_parameter("max_impedance_force").as_double(); // TODO
@@ -161,6 +202,13 @@ CombinedImpedanceController::on_configure(
           get_node()->get_name() + std::string("/target_frame"), 1,
           std::bind(&CombinedImpedanceController::targetFrameCallback, this,
                     std::placeholders::_1));
+
+  m_target_joints_subscriber =
+      get_node()->create_subscription<sensor_msgs::msg::JointState>(
+          get_node()->get_name() + std::string("/target_joint_state"), 1,
+          std::bind(&CombinedImpedanceController::targetJointsCallback, this,
+                    std::placeholders::_1));
+
   m_data_publisher = get_node()->create_publisher<debug_msg::msg::Debug>(
       get_node()->get_name() + std::string("/data"), 1);
   
@@ -230,14 +278,13 @@ CombinedImpedanceController::on_activate(
 
   RCLCPP_INFO(get_node()->get_logger(), "Finished Impedance on_activate");
   
-  m_motion_error_integral = ctrl::Vector6D::Zero();
-  m_last_time_target_frame_received = get_node()->now();
+  m_cart_motion_error_integral = ctrl::Vector6D::Zero();
 
   m_target_wrench = ctrl::Vector6D::Zero();
   m_ft_sensor_wrench = ctrl::Vector6D::Zero();
 
- std::lock_guard<std::mutex> lock(heartbeat_mutex);
- last_heartbeat_time = get_node()->get_clock()->now();
+  std::lock_guard<std::mutex> lock(heartbeat_mutex);
+  last_heartbeat_time = get_node()->get_clock()->now();
 
   // initialize controller state
   controller_state = ControllerState::RUNNING;
@@ -397,10 +444,10 @@ void CombinedImpedanceController::freezeDesiredPoses() {
     // freeze arm pose with desired pose
     frozen_pose.pose = m_current_frame;
     m_target_frame = m_current_frame;
-    m_motion_error_integral = ctrl::Vector6D::Zero();
+    m_cart_motion_error_integral = ctrl::Vector6D::Zero();
 }
 
-ctrl::Vector6D CombinedImpedanceController::computeMotionError() {
+ctrl::Vector6D CombinedImpedanceController::computeCartMotionError() {
   // Compute the cartesian error between the current and the target frame
   KDL::Frame target_frame;
   if (controller_state == ControllerState::RUNNING) {
@@ -464,6 +511,18 @@ ctrl::Vector6D CombinedImpedanceController::computeMotionError() {
   return error;
 }
 
+ctrl::VectorND computeJointMotionError() {
+  // Compute the joint space error between the current and the target configuration
+  ctrl::VectorND error = m_target_joints - Base::m_joint_positions.data;
+
+  // Clamp the error to avoid excessive torques
+  const double max_joint_error = 0.5; // TODO: tune this parameter
+  for (size_t i = 0; i < error.size(); ++i) {
+    error(i) = std::clamp(error(i), -max_joint_error, max_joint_error);
+  }
+  return error;
+}
+
 ctrl::VectorND CombinedImpedanceController::computeTorque() {
   // Redefine joints velocities in Eigen format
   ctrl::VectorND q = Base::m_joint_positions.data;
@@ -489,41 +548,64 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
   m_dyn_solver->JntToMass(Base::m_joint_positions, M);
   ctrl::Matrix6D Lambda = (jac * M.data.inverse() * jac.transpose()).inverse();
 
-  // Compute the motion error
-  ctrl::Vector6D motion_error = computeMotionError();
 
   // Initialize the torque vectors
-  ctrl::VectorND tau_task(Base::m_joint_number), tau_null(Base::m_joint_number),
-      tau_ext(Base::m_joint_number), tau_task_old(Base::m_joint_number),
-      tau(Base::m_joint_number);
+  ctrl::VectorND tau_task(Base::m_joint_number), tau_joint(Base::m_joint_number), 
+      tau_null(Base::m_joint_number),tau_ext(Base::m_joint_number), tau(Base::m_joint_number);
 
   // init tau to zero
   tau.setZero();
   tau_ext.setZero();
-  tau_task_old.setZero();
   tau_task.setZero();
+  tau_joint.setZero();
   tau_null.setZero();
 
-  // Compute the stiffness and damping in the base link
-  const auto base_link_stiffness =
-      Base::displayInBaseLink(m_cartesian_stiffness, Base::m_end_effector_link);
+  if (control_mode == ControlMode::JOINT) {
+    // Compute the motion error
+    const ctrl::VectorND motion_error = computeJointMotionError();
+    // Compute the stiffness and damping in the joint space
+    const ctrl::MatrixND K_d = m_joint_stiffness;
+    const ctrl::MatrixND D_d = m_joint_damping;
+    const ctrl::MatrixND K_i = m_joint_integral_gain;
 
-  ctrl::Matrix6D K_d = base_link_stiffness;
-  // Eigen::VectorXd damping_correction = 3.0 * Eigen::VectorXd::Ones(6);
-  ctrl::Matrix6D D_d = compute_correct_damping(Lambda, K_d, m_damping_ratio);
-  ctrl::Matrix6D K_i = m_cartesian_integral_gain;
+    // Anti-windup: clamp the integral error to prevent excessive torques
+    m_joint_motion_error_integral << (m_joint_motion_error_integral + 0.1 * motion_error).cwiseMax(-0.1).cwiseMin(0.1);
 
-  // Anti-windup: clamp the integral error to prevent excessive torques
-  m_motion_error_integral.head(3) << (m_motion_error_integral.head(3) + 0.1 * motion_error.head(3)).cwiseMax(-0.1).cwiseMin(0.1);
-  m_motion_error_integral.tail(3) << (m_motion_error_integral.tail(3) + 0.1 * motion_error.tail(3)).cwiseMax(-0.05).cwiseMin(0.05);
+    const ctrl::VectorND stiffness_torque = K_d * motion_error;
+    const ctrl::VectorND damping_torque = D_d * (-q_dot);
+    const ctrl::VectorND integral_torque = K_i * m_joint_motion_error_integral
 
-  // D_d = Base::displayInBaseLink(m_cartesian_damping, Base::m_end_effector_link);
-  ctrl::Vector6D stiffness_torque = jac.transpose() * (K_d * motion_error);
-  ctrl::Vector6D damping_torque = jac.transpose() * (D_d * ( - jac * q_dot));
-  ctrl::Vector6D integral_torque = jac.transpose() * (K_i * m_motion_error_integral);
+    // Compute the task torque
+    tau_task = stiffness_torque + damping_torque + integral_torque;
+  }
+  else if (control_mode == ControlMode::CARTESIAN) {
+    // Compute the motion error
+    const ctrl::Vector6D motion_error = computeCartMotionError();
 
-  // Compute the task torque
-  tau_task = stiffness_torque + damping_torque + integral_torque;
+    // Compute the stiffness and damping in the base link
+    const auto base_link_stiffness =
+        Base::displayInBaseLink(m_cartesian_stiffness, Base::m_end_effector_link);
+
+    const ctrl::Matrix6D K_d = base_link_stiffness;
+    // Eigen::VectorXd damping_correction = 3.0 * Eigen::VectorXd::Ones(6);
+    const ctrl::Matrix6D D_d = compute_correct_damping(Lambda, K_d, m_damping_ratio);
+    const ctrl::Matrix6D K_i = m_cartesian_integral_gain;
+
+    // Anti-windup: clamp the integral error to prevent excessive torques
+    m_cart_motion_error_integral.head(3) << (m_cart_motion_error_integral.head(3) + 0.1 * motion_error.head(3)).cwiseMax(-0.1).cwiseMin(0.1);
+    m_cart_motion_error_integral.tail(3) << (m_cart_motion_error_integral.tail(3) + 0.1 * motion_error.tail(3)).cwiseMax(-0.05).cwiseMin(0.05);
+
+    const ctrl::Vector6D stiffness_torque = jac.transpose() * (K_d * motion_error);
+    const ctrl::Vector6D damping_torque = jac.transpose() * (D_d * ( - jac * q_dot));
+    const ctrl::Vector6D integral_torque = jac.transpose() * (K_i * m_cart_motion_error_integral);
+
+    // Compute the task torque
+    tau_task = stiffness_torque + damping_torque + integral_torque;
+  }
+  else {
+    RCLCPP_ERROR(get_node()->get_logger(), "Unknown control mode!");
+    return;
+  }
 
   KDL::JntArray tau_coriolis(Base::m_joint_number),
       tau_gravity(Base::m_joint_number);
@@ -674,6 +756,9 @@ void CombinedImpedanceController::targetFrameCallback(
   if (controller_state != ControllerState::RUNNING) {
     return; // Don't accept new poses while in a non-normal state
   }
+  if (control_mode != ControllerMode::CARTESIAN) {
+    return; // Don't accept new poses if not in cartesian mode
+  }
 
   if (target->header.frame_id != Base::m_robot_base_link) {
     auto &clock = *get_node()->get_clock();
@@ -690,9 +775,30 @@ void CombinedImpedanceController::targetFrameCallback(
                      target->pose.orientation.z, target->pose.orientation.w),
                  KDL::Vector(target->pose.position.x, target->pose.position.y,
                              target->pose.position.z));
-
-  m_last_time_target_frame_received = get_node()->now();
 }
+
+void CombinedImpedanceController::targetJointsCallback(
+    const sensor_msgs::msg::JointState::SharedPtr target) {
+  if (controller_state != ControllerState::RUNNING) {
+    return; // Don't accept new poses while in a non-normal state
+  }
+  if (control_mode != ControllerMode::JOINT) {
+    return; // Don't accept new poses if not in joint mode
+  }
+
+  if (target->position.size() != Base::m_joint_number) {
+    auto &clock = *get_node()->get_clock();
+    RCLCPP_WARN_THROTTLE(
+        get_node()->get_logger(), clock, 3000,
+        "Got target joint state with wrong number of joints. Expected: %zu but got %zu",
+        Base::m_joint_number, target->position.size());
+    return;
+  }
+
+  m_target_joints = ctrl::VectorND::Zero(Base::m_joint_number);
+  for (size_t i = 0; i < Base::m_joint_number; ++i) {
+    m_target_joints(i) = target->position[i];
+  }
 
 void CombinedImpedanceController::heartbeatCallback(const std_msgs::msg::Bool::SharedPtr msg) {
     bool is_now_safe = msg->data;

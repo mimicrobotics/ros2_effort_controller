@@ -10,6 +10,7 @@
 #include "effort_controller_base/Utility.h"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/wrench_stamped.hpp"
+#include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/int32.hpp>
@@ -73,12 +74,26 @@ class CombinedImpedanceController
 
   using Base = effort_controller_base::EffortControllerBase;
 
+  // ====================================================
+  // = Config variables for cartesian impedance control =
+  // ====================================================
   ctrl::Matrix6D m_cartesian_stiffness;
   ctrl::Matrix6D m_cartesian_damping;
   ctrl::Matrix6D m_cartesian_integral_gain;
   double m_null_space_stiffness;
   double m_null_space_damping;
   double m_damping_ratio;
+
+  // ================================================
+  // = Config variables for joint impedance control =
+  // ================================================
+  const ctrl::MatrixND m_joint_stiffness;
+  const ctrl::MatrixND m_joint_damping;
+  const ctrl::MatrixND m_joint_integral_gain;
+
+  // ===========================
+  // = Common config variables =
+  // ===========================
   double m_max_impendance_force;
   ctrl::Vector6D m_target_wrench;
   std::string tf_prefix;
@@ -89,8 +104,11 @@ class CombinedImpedanceController
       const geometry_msgs::msg::WrenchStamped::SharedPtr wrench);
   void targetFrameCallback(
       const geometry_msgs::msg::PoseStamped::SharedPtr target);
+  void targetJointsCallback(
+      const sensor_msgs::msg::JointState::SharedPtr target);
   void heartbeatCallback(const std_msgs::msg::Bool::SharedPtr msg);
-  ctrl::Vector6D computeMotionError();
+  ctrl::Vector6D computeCartMotionError();
+  ctrl::VectorND computeJointMotionError();
   void freezeDesiredPoses();
 
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr
@@ -99,6 +117,8 @@ class CombinedImpedanceController
       m_target_wrench_subscriber;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr
       m_target_frame_subscriber;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr
+      m_target_joints_subscriber;
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr
       m_ft_sensor_subscriber;
   rclcpp::Publisher<debug_msg::msg::Debug>::SharedPtr m_data_publisher;
@@ -113,20 +133,39 @@ class CombinedImpedanceController
 #if LOGGING
   XBot::MatLogger2::Ptr m_logger;
 #endif
+
+  // ====================================================
+  // = Member variables for cartesian impedance control =
+  // ====================================================
   KDL::Frame m_target_frame;
+  KDL::JntArray m_null_space;
+  KDL::Frame m_current_frame;
+  ctrl::VectorND m_q_ns; // Null space configuration
+  ctrl::Vector6D m_cart_motion_error_integral;
+
+  // ================================================
+  // = Member variables for joint impedance control =
+  // ================================================
+  ctrl::VectorND m_target_joints;
+
+  // ===========================
+  // = Common member variables =
+  // ===========================
   ctrl::Vector6D m_ft_sensor_wrench;
-  ctrl::Vector6D m_motion_error_integral;
   std::string m_ft_sensor_ref_link;
   KDL::Frame m_ft_sensor_transform;
 
-  KDL::JntArray m_null_space;
-  KDL::Frame m_current_frame;
-
   ctrl::MatrixND m_identity;
-  ctrl::VectorND m_q_ns; // Null space configuration
 
   bool m_compensate_dJdq = false;
   bool m_debug_topics = false;
+
+  enum class ControlMode
+  {
+    CARTESIAN,
+    JOINT,
+  };
+  ControlMode control_mode;
 
   enum class StateInterfaces
   {
@@ -201,7 +240,6 @@ class CombinedImpedanceController
   std::atomic<bool> is_safe{true}; ///< Safety flag (atomic for thread safety).
   rclcpp::Time last_heartbeat_time;     ///< Timestamp of the last received heartbeat.
   std::mutex heartbeat_mutex; ///< Mutex to protect last_heartbeat_time_ access.
-  rclcpp::Time m_last_time_target_frame_received;
   std::atomic<bool> initial_heartbeat_received{false}; ///< Flag to indicate if the first heartbeat was received (atomic for thread safety).
 };
 
