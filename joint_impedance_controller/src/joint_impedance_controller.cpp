@@ -143,8 +143,9 @@ JointImpedanceController::on_deactivate(
       CallbackReturn::SUCCESS;
 }
 
-controller_interface::return_type JointImpedanceController::update(
-    const rclcpp::Time &time, const rclcpp::Duration &period) {
+controller_interface::return_type
+JointImpedanceController::update(const rclcpp::Time &time,
+                                 const rclcpp::Duration &period) {
   // Update joint states
   Base::updateJointStates();
 
@@ -172,7 +173,7 @@ ctrl::Vector6D JointImpedanceController::computeMotionError() {
   // Use Rodrigues Vector for a compact representation of orientation errors
   // Only for angles within [0,Pi)
   KDL::Vector rot_axis = KDL::Vector::Zero();
-  double angle = error_kdl.M.GetRotAngle(rot_axis);  // rot_axis is normalized
+  double angle = error_kdl.M.GetRotAngle(rot_axis); // rot_axis is normalized
   double distance = error_kdl.p.Normalize();
 
   // Clamp maximal tolerated error.
@@ -283,7 +284,7 @@ void JointImpedanceController::targetFrameCallback(
                  KDL::Vector(target->pose.position.x, target->pose.position.y,
                              target->pose.position.z));
 }
-}  // namespace joint_impedance_controller
+} // namespace joint_impedance_controller
 
 // Pluginlib
 #include <pluginlib/class_list_macros.hpp>

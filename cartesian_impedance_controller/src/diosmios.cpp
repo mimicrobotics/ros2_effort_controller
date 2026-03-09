@@ -73,7 +73,7 @@ CartesianImpedanceController::on_configure(
   tmp[3] = 2 * sqrt(tmp[3]);
   tmp[4] = 2 * sqrt(tmp[4]);
   tmp[5] = 2 * sqrt(tmp[5]);
-  
+
   m_cartesian_damping = tmp.asDiagonal();
 
   m_max_impendance_force =
@@ -105,9 +105,9 @@ CartesianImpedanceController::on_configure(
       m_q_ns(i) = nullspace_config[i];
     }
     RCLCPP_INFO_STREAM(get_node()->get_logger(),
-    "Postural task stiffness: " << m_null_space_stiffness
-    << " for configuration: "
-    << m_q_ns.transpose());
+                       "Postural task stiffness: " << m_null_space_stiffness
+                                                   << " for configuration: "
+                                                   << m_q_ns.transpose());
   }
   m_compensate_dJdq = get_node()->get_parameter("compensate_dJdq").as_bool();
   RCLCPP_INFO(get_node()->get_logger(), "Compensate dJdq: %d",
@@ -125,7 +125,7 @@ CartesianImpedanceController::on_configure(
           get_node()->get_name() + std::string("/target_wrench"), 10,
           std::bind(&CartesianImpedanceController::targetWrenchCallback, this,
                     std::placeholders::_1));
-                
+
   m_ft_sensor_subscriber =
       get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
           get_node()->get_name() + std::string("/ft_sensor_wrench"), 10,
@@ -146,9 +146,10 @@ CartesianImpedanceController::on_configure(
                     std::placeholders::_1));
   m_data_publisher = get_node()->create_publisher<debug_msg::msg::Debug>(
       get_node()->get_name() + std::string("/data"), 1);
-  
-  m_data_impedance_publisher = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
-      get_node()->get_name() + std::string("/data_impedance"), 1);
+
+  m_data_impedance_publisher =
+      get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
+          get_node()->get_name() + std::string("/data_impedance"), 1);
 
   RCLCPP_INFO(get_node()->get_logger(), "Finished Impedance on_configure");
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
@@ -171,10 +172,10 @@ CartesianImpedanceController::on_activate(
   m_target_frame_old = m_current_frame;
 
   RCLCPP_INFO(get_node()->get_logger(), "Finished Impedance on_activate");
-  
+
   m_error_old = ctrl::Vector6D::Zero();
   m_error_dot_old = ctrl::Vector6D::Zero();
-  m_target_velocity = ctrl::Vector6D::Zero();  
+  m_target_velocity = ctrl::Vector6D::Zero();
   m_last_time_target_frame_received = get_node()->now();
 
   m_target_wrench = ctrl::Vector6D::Zero();
@@ -304,25 +305,31 @@ ctrl::VectorND CartesianImpedanceController::computeTorque() {
 
   ctrl::Matrix6D K_d = base_link_stiffness;
   // Eigen::VectorXd damping_correction = 3.0 * Eigen::VectorXd::Ones(6);
-  ctrl::Matrix6D D_d = compute_correct_damping(Lambda, K_d, std::sqrt(2.0)/2.0);
+  ctrl::Matrix6D D_d =
+      compute_correct_damping(Lambda, K_d, std::sqrt(2.0) / 2.0);
 
-  // D_d = Base::displayInBaseLink(m_cartesian_damping, Base::m_end_effector_link);
+  // D_d = Base::displayInBaseLink(m_cartesian_damping,
+  // Base::m_end_effector_link);
   ctrl::Vector6D stiffness_torque = jac.transpose() * (K_d * motion_error);
-  ctrl::Vector6D damping_torque = jac.transpose() * (D_d * ( - jac * q_dot));
-  // ctrl::Vector6D dot_error = 0.3 * m_dot_error_old + 0.7 * (motion_error - m_error_old) / 0.001;
+  ctrl::Vector6D damping_torque = jac.transpose() * (D_d * (-jac * q_dot));
+  // ctrl::Vector6D dot_error = 0.3 * m_dot_error_old + 0.7 * (motion_error -
+  // m_error_old) / 0.001;
 
   // // m_error_old = motion_error;
   // RCLCPP_INFO_STREAM(
-  //     get_node()->get_logger(), 
+  //     get_node()->get_logger(),
   //     "Commanded pos and vel:" << motion_error.transpose() << " , "
-  //                              << (m_target_velocity - jac * q_dot).transpose()  
+  //                              << (m_target_velocity - jac *
+  //                              q_dot).transpose()
   //       );
-  
+
   // RCLCPP_INFO_STREAM_THROTTLE(
   //     get_node()->get_logger(), *get_node()->get_clock(), 5000,
   //     "Damping matrix in ee frame: \n"
-  //         << Base::displayInTipLink(D_d, Base::m_end_effector_link) << "\n Force in ee frame: \n"
-  //         << Base::displayInTipLink(force, Base::m_end_effector_link) << "\n Force in base frame: \n"
+  //         << Base::displayInTipLink(D_d, Base::m_end_effector_link) << "\n
+  //         Force in ee frame: \n"
+  //         << Base::displayInTipLink(force, Base::m_end_effector_link) << "\n
+  //         Force in base frame: \n"
   //       );
   // Compute the task torque
   tau_task = stiffness_torque + damping_torque;
@@ -340,7 +347,8 @@ ctrl::VectorND CartesianImpedanceController::computeTorque() {
     tau = tau + tau_coriolis.data;
   }
   // Computes the Jacobian derivative * q_dot, negligible for most of the robot
-  Eigen::VectorXd j_tran_lambda_jdot_qdot = Eigen::VectorXd::Zero(Base::m_joint_number);
+  Eigen::VectorXd j_tran_lambda_jdot_qdot =
+      Eigen::VectorXd::Zero(Base::m_joint_number);
   if (m_compensate_dJdq) {
     KDL::JntArrayVel q_in(Base::m_joint_positions, Base::m_joint_velocities);
     KDL::Twist jac_dot_q_dot;
@@ -399,47 +407,54 @@ ctrl::VectorND CartesianImpedanceController::computeTorque() {
     }
   }
 #endif
-  
-double k_p = 0.8;
+
+  double k_p = 0.8;
   // Compute the torque to achieve the desired force
   if (m_target_wrench.norm() > 0.1) {
-    tau_ext = jac.transpose() * (m_target_wrench + k_p * (m_target_wrench + m_ft_sensor_wrench));
+    tau_ext = jac.transpose() *
+              (m_target_wrench + k_p * (m_target_wrench + m_ft_sensor_wrench));
     RCLCPP_INFO_STREAM_THROTTLE(
         get_node()->get_logger(), *get_node()->get_clock(), 5000,
         "External wrench desired: \n"
             << m_target_wrench << "\n"
             << "Measured wrench: \n"
-            << m_ft_sensor_wrench << "\n" <<
-            "Torque ext: \n"
-            << tau_ext.transpose() << "\n" <<
-            "Feedforward target wrench: \n" <<
-            (m_target_wrench + k_p * (m_target_wrench + m_ft_sensor_wrench)).transpose() << "\n"
-      );
-  }
-  else {
+            << m_ft_sensor_wrench << "\n"
+            << "Torque ext: \n"
+            << tau_ext.transpose() << "\n"
+            << "Feedforward target wrench: \n"
+            << (m_target_wrench + k_p * (m_target_wrench + m_ft_sensor_wrench))
+                   .transpose()
+            << "\n");
+  } else {
     tau_ext = ctrl::VectorND::Zero(Base::m_joint_number);
   }
   // Sum up all torques
   tau += tau_task + tau_null + tau_ext;
-  
+
   // // tau = ctrl::VectorND::Zero(Base::m_joint_number);
   // Base::m_dyn_solver->JntToCoriolis(Base::m_joint_positions,
-  //                                     Base::m_joint_velocities, tau_coriolis);
+  //                                     Base::m_joint_velocities,
+  //                                     tau_coriolis);
   // // Compute error dot and dot dot
   // ctrl::Vector6D dot_error = 0.5 * (jac * q_dot) + 0.5 * m_error_dot_old;
-  // ctrl::Vector6D dot_dot_error = 0.6 * (dot_error - m_error_dot_old) / 0.001 + 0.4 * m_error_dot_dot_old;
-  // m_error_dot_dot_old = dot_dot_error;
+  // ctrl::Vector6D dot_dot_error = 0.6 * (dot_error - m_error_dot_old) / 0.001
+  // + 0.4 * m_error_dot_dot_old; m_error_dot_dot_old = dot_dot_error;
   // m_error_dot_old = dot_error;
   // m_error_old = motion_error;
   // ctrl::Vector6D error_dot_joints = m_target_velocity - jac * q_dot;
-  // ctrl::Vector6D force = K_d * motion_error + D_d * (m_target_velocity - jac * q_dot) - Lambda * dot_dot_error + jac_tran_pseudo_inverse * (tau_coriolis.data + j_tran_lambda_jdot_qdot);
-  // ctrl::Vector6D force2 = K_d * motion_error + D_d * (m_target_velocity - jac * q_dot) + jac_tran_pseudo_inverse * (tau_coriolis.data + j_tran_lambda_jdot_qdot);
+  // ctrl::Vector6D force = K_d * motion_error + D_d * (m_target_velocity - jac
+  // * q_dot) - Lambda * dot_dot_error + jac_tran_pseudo_inverse *
+  // (tau_coriolis.data + j_tran_lambda_jdot_qdot); ctrl::Vector6D force2 = K_d
+  // * motion_error + D_d * (m_target_velocity - jac * q_dot) +
+  // jac_tran_pseudo_inverse * (tau_coriolis.data + j_tran_lambda_jdot_qdot);
   // ctrl::Vector6D vel = - jac * q_dot;
-  // auto tmp = jac_tran_pseudo_inverse * (tau_coriolis.data + j_tran_lambda_jdot_qdot);
+  // auto tmp = jac_tran_pseudo_inverse * (tau_coriolis.data +
+  // j_tran_lambda_jdot_qdot);
 
   // // Publish impedance data
-  // ctrl::Vector6D force_ee = Base::displayInTipLink(force, Base::m_end_effector_link);
-  // ctrl::Vector6D force_ee2 = Base::displayInTipLink(force2, Base::m_end_effector_link);
+  // ctrl::Vector6D force_ee = Base::displayInTipLink(force,
+  // Base::m_end_effector_link); ctrl::Vector6D force_ee2 =
+  // Base::displayInTipLink(force2, Base::m_end_effector_link);
 
   // static std_msgs::msg::Float64MultiArray impedance_message;
   // impedance_message.data = {motion_error(2),
@@ -454,13 +469,15 @@ double k_p = 0.8;
   //                           m_current_frame.p.z(),
   //                           tmp(2)
   //                           };
-  // // ctrl::Matrix6D D_ee = Base::displayInTipLink(D_d, Base::m_end_effector_link);
-  // // ctrl::Vector6D force_ee = Base::displayInTipLink(force, Base::m_end_effector_link);
-  // // impedance_message.data = {D_ee(2,2),force_ee(2),D_ee(0,0),D_ee(1,1),D_ee(2,2),D_ee(3,3),D_ee(4,4),D_ee(5,5),
-  // //                          force_ee(0),force_ee(1),force_ee(2),force_ee(3),force_ee(4),force_ee(5)};
+  // // ctrl::Matrix6D D_ee = Base::displayInTipLink(D_d,
+  // Base::m_end_effector_link);
+  // // ctrl::Vector6D force_ee = Base::displayInTipLink(force,
+  // Base::m_end_effector_link);
+  // // impedance_message.data =
+  // {D_ee(2,2),force_ee(2),D_ee(0,0),D_ee(1,1),D_ee(2,2),D_ee(3,3),D_ee(4,4),D_ee(5,5),
+  // //
+  // force_ee(0),force_ee(1),force_ee(2),force_ee(3),force_ee(4),force_ee(5)};
   // m_data_impedance_publisher->publish(impedance_message);
-
-
 
   return tau;
 }
@@ -484,16 +501,18 @@ void CartesianImpedanceController::targetWrenchCallback(
 }
 
 void CartesianImpedanceController::ftSensorWrenchCallback(
-  const geometry_msgs::msg::WrenchStamped::SharedPtr wrench)
-{
+    const geometry_msgs::msg::WrenchStamped::SharedPtr wrench) {
 
-  if (std::isnan(wrench->wrench.force.x) || std::isnan(wrench->wrench.force.y) ||
-      std::isnan(wrench->wrench.force.z) || std::isnan(wrench->wrench.torque.x) ||
-      std::isnan(wrench->wrench.torque.y) || std::isnan(wrench->wrench.torque.z))
-  {
-    auto & clock = *get_node()->get_clock();
-    RCLCPP_WARN_STREAM_THROTTLE(get_node()->get_logger(), clock, 3000,
-                                "NaN detected in force-torque sensor wrench. Ignoring input.");
+  if (std::isnan(wrench->wrench.force.x) ||
+      std::isnan(wrench->wrench.force.y) ||
+      std::isnan(wrench->wrench.force.z) ||
+      std::isnan(wrench->wrench.torque.x) ||
+      std::isnan(wrench->wrench.torque.y) ||
+      std::isnan(wrench->wrench.torque.z)) {
+    auto &clock = *get_node()->get_clock();
+    RCLCPP_WARN_STREAM_THROTTLE(
+        get_node()->get_logger(), clock, 3000,
+        "NaN detected in force-torque sensor wrench. Ignoring input.");
     return;
   }
 
@@ -508,8 +527,7 @@ void CartesianImpedanceController::ftSensorWrenchCallback(
   // m_mass: mass of the attached object [kg]
   // m_com: center of mass of the attached object in sensor frame [KDL::Vector]
   double m_mass = 0.135617; // [kg]
-  if (m_mass > 0.0)
-  {
+  if (m_mass > 0.0) {
     // Gravity in base frame
     KDL::Vector gravity_base(0.0, 0.0, -9.8067); // [m/s^2]
 
@@ -558,17 +576,17 @@ void CartesianImpedanceController::targetFrameCallback(
   // // Compute target velocity
   // constexpr double dt = 0.001; // control period
 
-  // if ((get_node()->now() - m_last_time_target_frame_received).nanoseconds() < 2e6) {
-  //   KDL::Twist delta_twist = KDL::diff(m_target_frame_old, m_target_frame) / dt;
-  //   m_target_velocity[0] = delta_twist.vel.x();
-  //   m_target_velocity[1] = delta_twist.vel.y();
-  //   m_target_velocity[2] = delta_twist.vel.z();
+  // if ((get_node()->now() - m_last_time_target_frame_received).nanoseconds() <
+  // 2e6) {
+  //   KDL::Twist delta_twist = KDL::diff(m_target_frame_old, m_target_frame) /
+  //   dt; m_target_velocity[0] = delta_twist.vel.x(); m_target_velocity[1] =
+  //   delta_twist.vel.y(); m_target_velocity[2] = delta_twist.vel.z();
   //   m_target_velocity[3] = delta_twist.rot.x();
   //   m_target_velocity[4] = delta_twist.rot.y();
   //   m_target_velocity[5] = delta_twist.rot.z();
-  // } 
+  // }
   // else if{
-  //   ;// m_target_velocity = ctrl::Vector6D::Zero();  
+  //   ;// m_target_velocity = ctrl::Vector6D::Zero();
   // }
 
   // m_target_frame_old = m_target_frame;

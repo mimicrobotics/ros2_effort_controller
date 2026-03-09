@@ -18,7 +18,7 @@ namespace gravity_compensation {
 
 class GravityCompensation
     : public virtual effort_controller_base::EffortControllerBase {
- public:
+public:
   GravityCompensation();
 
   virtual LifecycleNodeInterface::CallbackReturn on_init() override;
@@ -32,15 +32,14 @@ class GravityCompensation
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
   on_deactivate(const rclcpp_lifecycle::State &previous_state) override;
 
-  controller_interface::return_type update(
-      const rclcpp::Time &time, const rclcpp::Duration &period) override;
+  controller_interface::return_type
+  update(const rclcpp::Time &time, const rclcpp::Duration &period) override;
 
   ctrl::VectorND computeTorque();
 
   using Base = effort_controller_base::EffortControllerBase;
 
-
- private:
+private:
   ctrl::Vector6D compensateGravity();
 
   ctrl::Vector6D m_ft_sensor_wrench;
@@ -49,9 +48,10 @@ class GravityCompensation
 
   ctrl::MatrixND m_identity;
 
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr m_data_impedance_publisher;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
+      m_data_impedance_publisher;
 };
 
-}  // namespace gravity_compensation {
+} // namespace gravity_compensation
 
 #endif

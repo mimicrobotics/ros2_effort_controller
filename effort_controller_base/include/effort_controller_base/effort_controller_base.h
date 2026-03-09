@@ -140,7 +140,7 @@ protected:
    */
   ctrl::Vector6D displayInTipLink(const ctrl::Vector6D &vector,
                                   const std::string &to);
-                              
+
   ctrl::Matrix6D displayInTipLink(const ctrl::Matrix6D &tensor,
                                   const std::string &to);
 
@@ -199,7 +199,8 @@ protected:
   std::string m_robot_base_link;
   bool m_compensate_gravity;
   bool m_compensate_coriolis;
-  bool m_command_current_configuration_; // KUKA specific, for KUKA set this to true
+  bool m_command_current_configuration_; // KUKA specific, for KUKA set this to
+                                         // true
   std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
       m_joint_state_pos_handles;
   std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
@@ -210,7 +211,6 @@ protected:
   KDL::JntArray m_joint_velocities;
   KDL::JntArray m_old_joint_velocities;
   KDL::JntArray m_simulated_joint_motion;
-
 
 private:
   std::vector<std::string> m_cmd_interface_types;

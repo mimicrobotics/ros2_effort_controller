@@ -294,7 +294,8 @@ EffortControllerBase::on_configure(
         CallbackReturn::ERROR;
   }
   // Check if kuka is been used
-  m_command_current_configuration_ = get_node()->get_parameter("command_current_configuration").as_bool();
+  m_command_current_configuration_ =
+      get_node()->get_parameter("command_current_configuration").as_bool();
   if (m_command_current_configuration_ == true) {
     RCLCPP_WARN(
         get_node()->get_logger(),
@@ -313,7 +314,6 @@ EffortControllerBase::on_configure(
   m_old_joint_velocities.resize(m_joint_number);
   m_old_joint_velocities.data.setZero();
   m_simulated_joint_motion.resize(m_joint_number);
-
 
   RCLCPP_INFO(get_node()->get_logger(), "Finished Base on_configure");
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
@@ -454,7 +454,6 @@ void EffortControllerBase::computeJointEffortCmds(const ctrl::VectorND &tau) {
 
     m_efforts[i] +=
         std::min(std::max(difference, -m_delta_tau_max), m_delta_tau_max);
-    
   }
 }
 
@@ -521,8 +520,8 @@ EffortControllerBase::displayInBaseLink(const ctrl::Matrix6D &tensor,
   return tmp;
 }
 /*
-ctrl::Matrix6D EffortControllerBase::displayInBaseLink(const ctrl::Matrix6D &tensor,
-                                                       const std::string &from) {
+ctrl::Matrix6D EffortControllerBase::displayInBaseLink(const ctrl::Matrix6D
+&tensor, const std::string &from) {
   // Get transform from 'from' link to base
   KDL::Frame T_kdl;
   m_forward_kinematics_solver->JntToCart(m_joint_positions, T_kdl, from);
@@ -595,7 +594,8 @@ EffortControllerBase::displayInTipLink(const ctrl::Matrix6D &tensor,
   // Treat diagonal blocks as individual 2nd rank tensors.
   // Display in base frame.
   ctrl::Matrix6D tmp = ctrl::Matrix6D::Zero();
-  tmp.topLeftCorner<3, 3>() = R.inverse() * tensor.topLeftCorner<3, 3>() * R.inverse().transpose();
+  tmp.topLeftCorner<3, 3>() =
+      R.inverse() * tensor.topLeftCorner<3, 3>() * R.inverse().transpose();
   tmp.bottomRightCorner<3, 3>() =
       R.inverse() * tensor.bottomRightCorner<3, 3>() * R.inverse().transpose();
 
@@ -608,7 +608,8 @@ void EffortControllerBase::updateJointStates() {
     const auto &velocity_interface = m_joint_state_vel_handles[i].get();
 
     m_joint_positions(i) = position_interface.get_value();
-    // m_joint_velocities(i) = (m_dotq_alpha * velocity_interface.get_value() + (1 - m_dotq_alpha) * m_old_joint_velocities(i));
+    // m_joint_velocities(i) = (m_dotq_alpha * velocity_interface.get_value() +
+    // (1 - m_dotq_alpha) * m_old_joint_velocities(i));
     m_joint_velocities(i) =
         std::round((m_dotq_alpha * velocity_interface.get_value() +
                     (1 - m_dotq_alpha) * m_old_joint_velocities(i)) *

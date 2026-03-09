@@ -13,7 +13,6 @@ csi: Damping ratio
 diag_correction: damping correction to account for inertia inaccuracy
 */
 
-
 Eigen::MatrixXd compute_correct_damping(
     const Eigen::MatrixXd &Lambda, const Eigen::MatrixXd &K_d,
     const double csi = 1.0,

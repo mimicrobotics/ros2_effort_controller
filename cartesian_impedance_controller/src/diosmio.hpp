@@ -44,7 +44,7 @@ namespace cartesian_impedance_controller {
  */
 class CartesianImpedanceController
     : public virtual effort_controller_base::EffortControllerBase {
- public:
+public:
   CartesianImpedanceController();
 
   virtual LifecycleNodeInterface::CallbackReturn on_init() override;
@@ -58,8 +58,8 @@ class CartesianImpedanceController
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
   on_deactivate(const rclcpp_lifecycle::State &previous_state) override;
 
-  controller_interface::return_type update(
-      const rclcpp::Time &time, const rclcpp::Duration &period) override;
+  controller_interface::return_type
+  update(const rclcpp::Time &time, const rclcpp::Duration &period) override;
 
   ctrl::VectorND computeTorque();
 
@@ -72,15 +72,15 @@ class CartesianImpedanceController
   double m_max_impendance_force;
   ctrl::Vector6D m_target_wrench;
 
- private:
+private:
   ctrl::Vector6D compensateGravity();
 
   void targetWrenchCallback(
       const geometry_msgs::msg::WrenchStamped::SharedPtr wrench);
   void ftSensorWrenchCallback(
       const geometry_msgs::msg::WrenchStamped::SharedPtr wrench);
-  void targetFrameCallback(
-      const geometry_msgs::msg::PoseStamped::SharedPtr target);
+  void
+  targetFrameCallback(const geometry_msgs::msg::PoseStamped::SharedPtr target);
   ctrl::Vector6D computeMotionError();
 
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr
@@ -90,7 +90,8 @@ class CartesianImpedanceController
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr
       m_ft_sensor_subscriber;
   rclcpp::Publisher<debug_msg::msg::Debug>::SharedPtr m_data_publisher;
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr m_data_impedance_publisher;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
+      m_data_impedance_publisher;
 #if LOGGING
   XBot::MatLogger2::Ptr m_logger;
 #endif
@@ -124,6 +125,6 @@ class CartesianImpedanceController
   rclcpp::Time m_last_time_target_frame_received;
 };
 
-}  // namespace cartesian_impedance_controller
+} // namespace cartesian_impedance_controller
 
 #endif

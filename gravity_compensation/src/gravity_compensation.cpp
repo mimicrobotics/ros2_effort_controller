@@ -2,8 +2,7 @@
 
 namespace gravity_compensation {
 
-GravityCompensation::GravityCompensation()
-    : Base::EffortControllerBase() {}
+GravityCompensation::GravityCompensation() : Base::EffortControllerBase() {}
 
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
 GravityCompensation::on_init() {
@@ -25,11 +24,11 @@ GravityCompensation::on_configure(
                  CallbackReturn::SUCCESS) {
     return ret;
   }
-    // Make sure sensor link is part of the robot chain
+  // Make sure sensor link is part of the robot chain
   m_ft_sensor_ref_link =
       get_node()->get_parameter("ft_sensor_ref_link").as_string();
   RCLCPP_INFO(get_node()->get_logger(), "Finished GravityCompensation "
-                                         "on_configure");
+                                        "on_configure");
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::SUCCESS;
 }
@@ -42,8 +41,9 @@ GravityCompensation::on_activate(
   // Update joint states
   Base::updateJointStates();
 
-  m_data_impedance_publisher = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
-      get_node()->get_name() + std::string("/data_impedance"), 1);
+  m_data_impedance_publisher =
+      get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
+          get_node()->get_name() + std::string("/data_impedance"), 1);
 
   RCLCPP_INFO(get_node()->get_logger(), "Finished Impedance on_activate");
 
@@ -64,8 +64,9 @@ GravityCompensation::on_deactivate(
       CallbackReturn::SUCCESS;
 }
 
-controller_interface::return_type GravityCompensation::update(
-    const rclcpp::Time &time, const rclcpp::Duration &period) {
+controller_interface::return_type
+GravityCompensation::update(const rclcpp::Time &time,
+                            const rclcpp::Duration &period) {
   // Update joint states
   Base::updateJointStates();
 
@@ -84,22 +85,19 @@ controller_interface::return_type GravityCompensation::update(
   static std_msgs::msg::Float64MultiArray current_orientation_message;
   double x, y, z, w;
   m_current_frame.M.GetQuaternion(x, y, z, w);
-  current_orientation_message.data = {
-      x, y, z, w
-  };
+  current_orientation_message.data = {x, y, z, w};
   m_data_impedance_publisher->publish(current_orientation_message);
   return controller_interface::return_type::OK;
 }
-
 
 ctrl::VectorND GravityCompensation::computeTorque() {
   KDL::JntArray tau_gravity(Base::m_joint_number);
   KDL::JntArray tau_coriolis(Base::m_joint_number);
   ctrl::VectorND tau(Base::m_joint_number);
 
-  // Set tau to zero 
+  // Set tau to zero
   tau.setZero();
-  
+
   if (m_compensate_gravity) {
     Base::m_dyn_solver->JntToGravity(Base::m_joint_positions, tau_gravity);
     tau = tau + tau_gravity.data;
@@ -119,7 +117,7 @@ ctrl::VectorND GravityCompensation::computeTorque() {
 
   return tau;
 }
-}  // namespace gravity_compensation
+} // namespace gravity_compensation
 
 // Pluginlib
 #include <pluginlib/class_list_macros.hpp>

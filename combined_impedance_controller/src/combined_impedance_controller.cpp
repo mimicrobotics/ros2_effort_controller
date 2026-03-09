@@ -18,7 +18,8 @@ CombinedImpedanceController::on_init() {
   auto_declare<bool>("hand_frame_control", true);
   auto_declare<double>("nullspace_stiffness", 0.0);
   auto_declare<bool>("compensate_dJdq", false);
-  auto_declare<bool>("debug_topics", false);  // Publish additional topics for debugging
+  auto_declare<bool>("debug_topics",
+                     false); // Publish additional topics for debugging
   auto_declare<std::vector<double>>("nullspace_desired_configuration",
                                     std::vector<double>());
 
@@ -32,7 +33,8 @@ CombinedImpedanceController::on_init() {
   auto_declare<double>("cart_stiffness.rot_z", default_rot_stiff);
   auto_declare<std::vector<double>>("joint_stiffness", std::vector<double>());
 
-  // Disable integral gain by default to avoid windup issues, can be enabled with parameters
+  // Disable integral gain by default to avoid windup issues, can be enabled
+  // with parameters
   constexpr double default_lin_integral = 0.0;
   constexpr double default_rot_integral = 0.0;
   auto_declare<double>("cart_integral_gain.trans_x", default_lin_integral);
@@ -41,8 +43,9 @@ CombinedImpedanceController::on_init() {
   auto_declare<double>("cart_integral_gain.rot_x", default_rot_integral);
   auto_declare<double>("cart_integral_gain.rot_y", default_rot_integral);
   auto_declare<double>("cart_integral_gain.rot_z", default_rot_integral);
-  auto_declare<double>("cart_damping_ratio", std::sqrt(2.0)/2.0);
-  auto_declare<std::vector<double>>("joint_integral_gain", std::vector<double>());
+  auto_declare<double>("cart_damping_ratio", std::sqrt(2.0) / 2.0);
+  auto_declare<std::vector<double>>("joint_integral_gain",
+                                    std::vector<double>());
 
   // Define upper limit for impedance forces
   auto_declare<double>("max_impedance_force", 70.0);
@@ -92,7 +95,7 @@ CombinedImpedanceController::on_configure(
   tmp[3] = 2 * sqrt(tmp[3]);
   tmp[4] = 2 * sqrt(tmp[4]);
   tmp[5] = 2 * sqrt(tmp[5]);
-  
+
   m_cartesian_damping = tmp.asDiagonal();
 
   // Set cartesian integral gain
@@ -108,14 +111,13 @@ CombinedImpedanceController::on_configure(
 
   // Set joint stiffness
   const std::vector<double> joint_stiffness =
-        get_node()
-            ->get_parameter("joint_stiffness")
-            .as_double_array();
+      get_node()->get_parameter("joint_stiffness").as_double_array();
   if (joint_stiffness.size() != Base::m_joint_number) {
-    RCLCPP_ERROR(get_node()->get_logger(),
-                  "Joint stiffness configuration size does not match joint number: "
-                  "%zu != %zu",
-                  joint_stiffness.size(), Base::m_joint_number);
+    RCLCPP_ERROR(
+        get_node()->get_logger(),
+        "Joint stiffness configuration size does not match joint number: "
+        "%zu != %zu",
+        joint_stiffness.size(), Base::m_joint_number);
     return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
         CallbackReturn::ERROR;
   }
@@ -124,24 +126,23 @@ CombinedImpedanceController::on_configure(
     m_joint_stiffness(i) = joint_stiffness[i];
   }
   RCLCPP_INFO_STREAM(get_node()->get_logger(),
-    "Joint stiffness: " << m_joint_stiffness.transpose());
+                     "Joint stiffness: " << m_joint_stiffness.transpose());
 
   // Set joint integral gain
   const std::vector<double> joint_integral_gain =
-        get_node()
-            ->get_parameter("joint_integral_gain")
-            .as_double_array();
+      get_node()->get_parameter("joint_integral_gain").as_double_array();
   if (joint_integral_gain.size() != Base::m_joint_number) {
-    RCLCPP_ERROR(get_node()->get_logger(),
-                  "Joint integral gain configuration size does not match joint number: "
-                  "%zu != %zu",
-                  joint_stiffness.size(), Base::m_joint_number);
+    RCLCPP_ERROR(
+        get_node()->get_logger(),
+        "Joint integral gain configuration size does not match joint number: "
+        "%zu != %zu",
+        joint_stiffness.size(), Base::m_joint_number);
     return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
         CallbackReturn::ERROR;
   }
   m_joint_integral_gain = joint_integral_gain.asDiagonal();
   RCLCPP_INFO_STREAM(get_node()->get_logger(),
-    "Joint stiffness: " << m_joint_integral_gain.transpose());
+                     "Joint stiffness: " << m_joint_integral_gain.transpose());
 
   m_max_impendance_force =
       get_node()->get_parameter("max_impedance_force").as_double(); // TODO
@@ -172,9 +173,9 @@ CombinedImpedanceController::on_configure(
       m_q_ns(i) = nullspace_config[i];
     }
     RCLCPP_INFO_STREAM(get_node()->get_logger(),
-    "Postural task stiffness: " << m_null_space_stiffness
-    << " for configuration: "
-    << m_q_ns.transpose());
+                       "Postural task stiffness: " << m_null_space_stiffness
+                                                   << " for configuration: "
+                                                   << m_q_ns.transpose());
   }
   m_compensate_dJdq = get_node()->get_parameter("compensate_dJdq").as_bool();
   RCLCPP_INFO(get_node()->get_logger(), "Compensate dJdq: %d",
@@ -190,7 +191,7 @@ CombinedImpedanceController::on_configure(
           get_node()->get_name() + std::string("/target_wrench"), 10,
           std::bind(&CombinedImpedanceController::targetWrenchCallback, this,
                     std::placeholders::_1));
-                
+
   m_ft_sensor_subscriber =
       get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
           get_node()->get_name() + std::string("/ft_sensor_wrench"), 10,
@@ -211,40 +212,47 @@ CombinedImpedanceController::on_configure(
 
   m_data_publisher = get_node()->create_publisher<debug_msg::msg::Debug>(
       get_node()->get_name() + std::string("/data"), 1);
-  
-  m_data_impedance_publisher = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
-      get_node()->get_name() + std::string("/data_impedance"), 1);
 
-   // Subscribe to heartbeat topic
-   m_heartbeat_subscriber = get_node()->create_subscription<std_msgs::msg::Bool>(
-       "collision_detection_heartbeat", 1,
-       std::bind(&CombinedImpedanceController::heartbeatCallback, this, std::placeholders::_1));
+  m_data_impedance_publisher =
+      get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
+          get_node()->get_name() + std::string("/data_impedance"), 1);
+
+  // Subscribe to heartbeat topic
+  m_heartbeat_subscriber = get_node()->create_subscription<std_msgs::msg::Bool>(
+      "collision_detection_heartbeat", 1,
+      std::bind(&CombinedImpedanceController::heartbeatCallback, this,
+                std::placeholders::_1));
 
   // Publisher for robot mode
-  m_robot_mode_publisher = get_node()->create_publisher<std_msgs::msg::Int32>(get_node()->get_name() + std::string("/robot_mode"), 1);
+  m_robot_mode_publisher = get_node()->create_publisher<std_msgs::msg::Int32>(
+      get_node()->get_name() + std::string("/robot_mode"), 1);
 
   // Get debug topics parameter and create publishers
   m_debug_topics = get_node()->get_parameter("debug_topics").as_bool();
   RCLCPP_INFO(get_node()->get_logger(), "Publishing debug topics: %d",
               m_debug_topics);
 
-  if (m_debug_topics) 
-  {
+  if (m_debug_topics) {
     // Publish current target frame
-    target_pose_pub_ = get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
-        get_node()->get_name() + std::string("/debug_target_frame"), 10);
+    target_pose_pub_ =
+        get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
+            get_node()->get_name() + std::string("/debug_target_frame"), 10);
 
     // Publish current end-effector frame
-    current_pose_pub_ = get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
-        get_node()->get_name() + std::string("/debug_current_frame"), 10);
+    current_pose_pub_ =
+        get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
+            get_node()->get_name() + std::string("/debug_current_frame"), 10);
 
-    // Publish clamped goal frame that the controller is actually trying to achieve (after error clamping)
-    next_goal_pose_pub_ = get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
-        get_node()->get_name() + std::string("/debug_next_goal_frame"), 10);
+    // Publish clamped goal frame that the controller is actually trying to
+    // achieve (after error clamping)
+    next_goal_pose_pub_ =
+        get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
+            get_node()->get_name() + std::string("/debug_next_goal_frame"), 10);
 
     // Publish orientation error angle
     angle_pub_ = get_node()->create_publisher<std_msgs::msg::Float64>(
-        get_node()->get_name() + std::string("/debug_orientation_error_angle"), 10);
+        get_node()->get_name() + std::string("/debug_orientation_error_angle"),
+        10);
   }
 
   RCLCPP_INFO(get_node()->get_logger(), "Finished Impedance on_configure");
@@ -254,13 +262,13 @@ CombinedImpedanceController::on_configure(
 
 controller_interface::InterfaceConfiguration
 CombinedImpedanceController::state_interface_configuration() const {
-  controller_interface::InterfaceConfiguration conf = EffortControllerBase::state_interface_configuration();
+  controller_interface::InterfaceConfiguration conf =
+      EffortControllerBase::state_interface_configuration();
   conf.names.emplace_back(tf_prefix + "gpio/robot_mode");
   conf.names.emplace_back(tf_prefix + "gpio/safety_mode");
   conf.names.emplace_back(tf_prefix + "gpio/program_running");
   return conf;
 }
-
 
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
 CombinedImpedanceController::on_activate(
@@ -273,12 +281,15 @@ CombinedImpedanceController::on_activate(
   // Compute the forward kinematics
   Base::m_fk_solver->JntToCart(Base::m_joint_positions, m_current_frame);
 
-  // Set the target frame to the current frame
+  // Set the target frame to the current frame, same for target joints
   m_target_frame = m_current_frame;
+  m_target_joints = Base::m_joint_positions.data;
 
   RCLCPP_INFO(get_node()->get_logger(), "Finished Impedance on_activate");
-  
+
+  // Reset integral terms and target joints
   m_cart_motion_error_integral = ctrl::Vector6D::Zero();
+  m_joint_motion_error_integral = ctrl::VectorND::Zero(Base::m_joint_number);
 
   m_target_wrench = ctrl::Vector6D::Zero();
   m_ft_sensor_wrench = ctrl::Vector6D::Zero();
@@ -288,6 +299,8 @@ CombinedImpedanceController::on_activate(
 
   // initialize controller state
   controller_state = ControllerState::RUNNING;
+  control_mode =
+      ControllerMode::CARTESIAN; // default to cartesian mode on activation
   mimic_robot_mode = MimicRobotMode::MOVE;
 #if LOGGING
   m_logger = XBot::MatLogger2::MakeLogger("/tmp/cart_impedance_log");
@@ -312,7 +325,7 @@ CombinedImpedanceController::on_deactivate(
 
 controller_interface::return_type
 CombinedImpedanceController::update(const rclcpp::Time &time,
-                                     const rclcpp::Duration &period) {
+                                    const rclcpp::Duration &period) {
   // Update joint states
   Base::updateJointStates();
 
@@ -334,11 +347,9 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
   return controller_interface::return_type::OK;
 }
 
-geometry_msgs::msg::PoseStamped toPoseStamped(
-    const KDL::Frame& frame,
-    const std::string& frame_id,
-    const rclcpp::Time& stamp)
-{
+geometry_msgs::msg::PoseStamped toPoseStamped(const KDL::Frame &frame,
+                                              const std::string &frame_id,
+                                              const rclcpp::Time &stamp) {
   geometry_msgs::msg::PoseStamped msg;
 
   msg.header.stamp = stamp;
@@ -368,49 +379,59 @@ void CombinedImpedanceController::updateControllerState() {
     // Read the flag and the time under the same lock to avoid race condition
     std::lock_guard<std::mutex> lock(heartbeat_mutex);
     current_last_heartbeat_time = last_heartbeat_time;
-    initial_heartbeat_was_received = initial_heartbeat_received.load(); // atomic read
+    initial_heartbeat_was_received =
+        initial_heartbeat_received.load(); // atomic read
   }
   // Check heartbeat only if the initial one has been received
   if (initial_heartbeat_was_received) { // Use the value read under the lock
-     double time_diff = (time - current_last_heartbeat_time).seconds();
-      if (time_diff > 0.5 && is_safe.load()) {
-           RCLCPP_INFO_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1.0, "Heartbeat timed out. Setting controller to UNSAFE. Current time: %f, Last heartbeat: %f",
-                    time.seconds(), current_last_heartbeat_time.seconds());
-            is_safe.store(false); // atomic write
-            initial_heartbeat_received.store(false);
-      }
+    double time_diff = (time - current_last_heartbeat_time).seconds();
+    if (time_diff > 0.5 && is_safe.load()) {
+      RCLCPP_INFO_THROTTLE(
+          get_node()->get_logger(), *get_node()->get_clock(), 1.0,
+          "Heartbeat timed out. Setting controller to UNSAFE. Current time: "
+          "%f, Last heartbeat: %f",
+          time.seconds(), current_last_heartbeat_time.seconds());
+      is_safe.store(false); // atomic write
+      initial_heartbeat_received.store(false);
     }
+  }
   if (controller_state == ControllerState::RUNNING) {
     if (!is_safe.load()) {
       controller_state = ControllerState::STOPPED;
-      RCLCPP_INFO(get_node()->get_logger(), "Collision detected! Freezing current pose. Recycle e-stops and move arms into a non collision config to continue operation.");
-    }
-    else if (robot_mode != RobotMode::RUNNING) {
+      RCLCPP_INFO(
+          get_node()->get_logger(),
+          "Collision detected! Freezing current pose. Recycle e-stops and move "
+          "arms into a non collision config to continue operation.");
+    } else if (robot_mode != RobotMode::RUNNING) {
       controller_state = ControllerState::STOPPED;
       RCLCPP_INFO(get_node()->get_logger(), "Robot not running!");
-    }
-    else if (safety_mode != SafetyMode::NORMAL) {
+    } else if (safety_mode != SafetyMode::NORMAL) {
       controller_state = ControllerState::STOPPED;
       RCLCPP_INFO(get_node()->get_logger(), "Safety mode not normal!");
-    }
-    else if (program_mode != ProgramMode::PLAYING) {
+    } else if (program_mode != ProgramMode::PLAYING) {
       controller_state = ControllerState::STOPPED;
       RCLCPP_INFO(get_node()->get_logger(), "Program not playing!");
     }
   }
 
-  if (!is_safe.load() || robot_mode != RobotMode::RUNNING || safety_mode != SafetyMode::NORMAL || program_mode != ProgramMode::PLAYING) {
+  if (!is_safe.load() || robot_mode != RobotMode::RUNNING ||
+      safety_mode != SafetyMode::NORMAL ||
+      program_mode != ProgramMode::PLAYING) {
     freezeDesiredPoses();
     mimic_robot_mode = MimicRobotMode::USER_STOPPED;
   }
 
-  // if  collision had occurred, we now enter a pending state to wait for recovery to finish.
+  // if  collision had occurred, we now enter a pending state to wait for
+  // recovery to finish.
   if (is_safe.load() && controller_state == ControllerState::STOPPED) {
     controller_state = ControllerState::WAITING;
   }
 
-  if (controller_state == ControllerState::WAITING && is_safe.load() && robot_mode == RobotMode::RUNNING && safety_mode == SafetyMode::NORMAL && program_mode == ProgramMode::PLAYING) {
-    RCLCPP_INFO(get_node()->get_logger(), "Robot in back in safe remote control state. Resuming...");
+  if (controller_state == ControllerState::WAITING && is_safe.load() &&
+      robot_mode == RobotMode::RUNNING && safety_mode == SafetyMode::NORMAL &&
+      program_mode == ProgramMode::PLAYING) {
+    RCLCPP_INFO(get_node()->get_logger(),
+                "Robot in back in safe remote control state. Resuming...");
     controller_state = ControllerState::RUNNING;
     mimic_robot_mode = MimicRobotMode::MOVE;
   }
@@ -421,39 +442,49 @@ void CombinedImpedanceController::updateControllerState() {
   m_robot_mode_publisher->publish(mode_msg);
 }
 
-void CombinedImpedanceController::updateRobotState()
-{
-  const auto robot_mode_new = static_cast<RobotMode>(state_interfaces_[static_cast<uint32_t>(StateInterfaces::ROBOT_MODE)].get_value());
+void CombinedImpedanceController::updateRobotState() {
+  const auto robot_mode_new = static_cast<RobotMode>(
+      state_interfaces_[static_cast<uint32_t>(StateInterfaces::ROBOT_MODE)]
+          .get_value());
   if (robot_mode_new != robot_mode) {
     robot_mode = robot_mode_new;
-    RCLCPP_INFO(get_node()->get_logger(), "Robot mode switched to: %s", toString(robot_mode));
+    RCLCPP_INFO(get_node()->get_logger(), "Robot mode switched to: %s",
+                toString(robot_mode));
   }
-  const auto safety_mode_new = static_cast<SafetyMode>(state_interfaces_[static_cast<uint32_t>(StateInterfaces::SAFETY_MODE)].get_value());
+  const auto safety_mode_new = static_cast<SafetyMode>(
+      state_interfaces_[static_cast<uint32_t>(StateInterfaces::SAFETY_MODE)]
+          .get_value());
   if (safety_mode_new != safety_mode) {
     safety_mode = safety_mode_new;
-    RCLCPP_INFO(get_node()->get_logger(), "Safety mode switched to: %s", toString(safety_mode));
+    RCLCPP_INFO(get_node()->get_logger(), "Safety mode switched to: %s",
+                toString(safety_mode));
   }
-  const auto program_mode_new = static_cast<ProgramMode>(state_interfaces_[static_cast<uint32_t>(StateInterfaces::PROGRAM_RUNNING)].get_value());
+  const auto program_mode_new = static_cast<ProgramMode>(
+      state_interfaces_[static_cast<uint32_t>(StateInterfaces::PROGRAM_RUNNING)]
+          .get_value());
   if (program_mode_new != program_mode) {
     program_mode = program_mode_new;
-    RCLCPP_INFO(get_node()->get_logger(), "Program mode switched to: %s", toString(program_mode));
+    RCLCPP_INFO(get_node()->get_logger(), "Program mode switched to: %s",
+                toString(program_mode));
   }
 }
 
 void CombinedImpedanceController::freezeDesiredPoses() {
-    // freeze arm pose with desired pose
-    frozen_pose.pose = m_current_frame;
-    m_target_frame = m_current_frame;
-    m_cart_motion_error_integral = ctrl::Vector6D::Zero();
+  // freeze arm pose with desired pose
+  frozen_pose.pose = m_current_frame;
+  m_target_frame = m_current_frame;
+  m_cart_motion_error_integral = ctrl::Vector6D::Zero();
+  m_target_joints = Base::m_joint_positions.data;
+  m_joint_motion_error_integral = ctrl::VectorND::Zero(Base::m_joint_number);
 }
 
 ctrl::Vector6D CombinedImpedanceController::computeCartMotionError() {
   // Compute the cartesian error between the current and the target frame
   KDL::Frame target_frame;
   if (controller_state == ControllerState::RUNNING) {
-      target_frame = m_target_frame;
+    target_frame = m_target_frame;
   } else { // STOPPED or WAITING, use frozen poses
-      target_frame = frozen_pose.pose;
+    target_frame = frozen_pose.pose;
   }
 
   // Transformation from target -> current corresponds to error = target -
@@ -487,21 +518,22 @@ ctrl::Vector6D CombinedImpedanceController::computeCartMotionError() {
   error.head<3>() << error_kdl.p.x(), error_kdl.p.y(), error_kdl.p.z();
   error.tail<3>() << rot_axis(0), rot_axis(1), rot_axis(2);
 
-  if (m_debug_topics)
-  {
+  if (m_debug_topics) {
     KDL::Frame next_goal_frame;
-    next_goal_frame.M = KDL::Rotation::Rot(rot_axis, rot_axis.Norm()) * m_current_frame.M;
+    next_goal_frame.M =
+        KDL::Rotation::Rot(rot_axis, rot_axis.Norm()) * m_current_frame.M;
     next_goal_frame.p = error_kdl.p + m_current_frame.p;
 
-    // Publish the target frame, current frame, and next goal frame for debugging
-    target_pose_pub_->publish(
-        toPoseStamped(target_frame, Base::m_robot_base_link, get_node()->now()));
+    // Publish the target frame, current frame, and next goal frame for
+    // debugging
+    target_pose_pub_->publish(toPoseStamped(
+        target_frame, Base::m_robot_base_link, get_node()->now()));
 
-    current_pose_pub_->publish(
-        toPoseStamped(m_current_frame, Base::m_robot_base_link, get_node()->now()));
+    current_pose_pub_->publish(toPoseStamped(
+        m_current_frame, Base::m_robot_base_link, get_node()->now()));
 
-    next_goal_pose_pub_->publish(
-        toPoseStamped(next_goal_frame, Base::m_robot_base_link, get_node()->now()));
+    next_goal_pose_pub_->publish(toPoseStamped(
+        next_goal_frame, Base::m_robot_base_link, get_node()->now()));
 
     std_msgs::msg::Float64 angle_msg;
     angle_msg.data = angle;
@@ -512,7 +544,8 @@ ctrl::Vector6D CombinedImpedanceController::computeCartMotionError() {
 }
 
 ctrl::VectorND computeJointMotionError() {
-  // Compute the joint space error between the current and the target configuration
+  // Compute the joint space error between the current and the target
+  // configuration
   ctrl::VectorND error = m_target_joints - Base::m_joint_positions.data;
 
   // Clamp the error to avoid excessive torques
@@ -548,10 +581,10 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
   m_dyn_solver->JntToMass(Base::m_joint_positions, M);
   ctrl::Matrix6D Lambda = (jac * M.data.inverse() * jac.transpose()).inverse();
 
-
   // Initialize the torque vectors
-  ctrl::VectorND tau_task(Base::m_joint_number), tau_joint(Base::m_joint_number), 
-      tau_null(Base::m_joint_number),tau_ext(Base::m_joint_number), tau(Base::m_joint_number);
+  ctrl::VectorND tau_task(Base::m_joint_number),
+      tau_joint(Base::m_joint_number), tau_null(Base::m_joint_number),
+      tau_ext(Base::m_joint_number), tau(Base::m_joint_number);
 
   // init tau to zero
   tau.setZero();
@@ -569,40 +602,51 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
     const ctrl::MatrixND K_i = m_joint_integral_gain;
 
     // Anti-windup: clamp the integral error to prevent excessive torques
-    m_joint_motion_error_integral << (m_joint_motion_error_integral + 0.1 * motion_error).cwiseMax(-0.1).cwiseMin(0.1);
+    m_joint_motion_error_integral
+        << (m_joint_motion_error_integral + 0.1 * motion_error)
+               .cwiseMax(-0.1)
+               .cwiseMin(0.1);
 
     const ctrl::VectorND stiffness_torque = K_d * motion_error;
     const ctrl::VectorND damping_torque = D_d * (-q_dot);
-    const ctrl::VectorND integral_torque = K_i * m_joint_motion_error_integral
+    const ctrl::VectorND integral_torque = K_i *m_joint_motion_error_integral
 
-    // Compute the task torque
-    tau_task = stiffness_torque + damping_torque + integral_torque;
-  }
-  else if (control_mode == ControlMode::CARTESIAN) {
+        // Compute the task torque
+        tau_task = stiffness_torque + damping_torque + integral_torque;
+  } else if (control_mode == ControlMode::CARTESIAN) {
     // Compute the motion error
     const ctrl::Vector6D motion_error = computeCartMotionError();
 
     // Compute the stiffness and damping in the base link
-    const auto base_link_stiffness =
-        Base::displayInBaseLink(m_cartesian_stiffness, Base::m_end_effector_link);
+    const auto base_link_stiffness = Base::displayInBaseLink(
+        m_cartesian_stiffness, Base::m_end_effector_link);
 
     const ctrl::Matrix6D K_d = base_link_stiffness;
     // Eigen::VectorXd damping_correction = 3.0 * Eigen::VectorXd::Ones(6);
-    const ctrl::Matrix6D D_d = compute_correct_damping(Lambda, K_d, m_damping_ratio);
+    const ctrl::Matrix6D D_d =
+        compute_correct_damping(Lambda, K_d, m_damping_ratio);
     const ctrl::Matrix6D K_i = m_cartesian_integral_gain;
 
     // Anti-windup: clamp the integral error to prevent excessive torques
-    m_cart_motion_error_integral.head(3) << (m_cart_motion_error_integral.head(3) + 0.1 * motion_error.head(3)).cwiseMax(-0.1).cwiseMin(0.1);
-    m_cart_motion_error_integral.tail(3) << (m_cart_motion_error_integral.tail(3) + 0.1 * motion_error.tail(3)).cwiseMax(-0.05).cwiseMin(0.05);
+    m_cart_motion_error_integral.head(3)
+        << (m_cart_motion_error_integral.head(3) + 0.1 * motion_error.head(3))
+               .cwiseMax(-0.1)
+               .cwiseMin(0.1);
+    m_cart_motion_error_integral.tail(3)
+        << (m_cart_motion_error_integral.tail(3) + 0.1 * motion_error.tail(3))
+               .cwiseMax(-0.05)
+               .cwiseMin(0.05);
 
-    const ctrl::Vector6D stiffness_torque = jac.transpose() * (K_d * motion_error);
-    const ctrl::Vector6D damping_torque = jac.transpose() * (D_d * ( - jac * q_dot));
-    const ctrl::Vector6D integral_torque = jac.transpose() * (K_i * m_cart_motion_error_integral);
+    const ctrl::Vector6D stiffness_torque =
+        jac.transpose() * (K_d * motion_error);
+    const ctrl::Vector6D damping_torque =
+        jac.transpose() * (D_d * (-jac * q_dot));
+    const ctrl::Vector6D integral_torque =
+        jac.transpose() * (K_i * m_cart_motion_error_integral);
 
     // Compute the task torque
     tau_task = stiffness_torque + damping_torque + integral_torque;
-  }
-  else {
+  } else {
     RCLCPP_ERROR(get_node()->get_logger(), "Unknown control mode!");
     return;
   }
@@ -620,7 +664,8 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
     tau = tau + tau_coriolis.data;
   }
   // Computes the Jacobian derivative * q_dot, negligible for most of the robot
-  Eigen::VectorXd j_tran_lambda_jdot_qdot = Eigen::VectorXd::Zero(Base::m_joint_number);
+  Eigen::VectorXd j_tran_lambda_jdot_qdot =
+      Eigen::VectorXd::Zero(Base::m_joint_number);
   if (m_compensate_dJdq) {
     KDL::JntArrayVel q_in(Base::m_joint_positions, Base::m_joint_velocities);
     KDL::Twist jac_dot_q_dot;
@@ -679,24 +724,25 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
     }
   }
 #endif
-  
-double k_p = 1.0;
+
+  double k_p = 1.0;
   // Compute the torque to achieve the desired force
   if (m_target_wrench.norm() > 0.1) {
-    tau_ext = jac.transpose() * (m_target_wrench + k_p * (m_target_wrench + m_ft_sensor_wrench));
+    tau_ext = jac.transpose() *
+              (m_target_wrench + k_p * (m_target_wrench + m_ft_sensor_wrench));
     RCLCPP_INFO_STREAM_THROTTLE(
         get_node()->get_logger(), *get_node()->get_clock(), 5000,
         "External wrench desired: \n"
             << m_target_wrench << "\n"
             << "Measured wrench: \n"
-            << m_ft_sensor_wrench << "\n" <<
-            "Torque ext: \n"
-            << tau_ext.transpose() << "\n" <<
-            "Feedforward target wrench: \n" <<
-            (m_target_wrench + k_p * (m_target_wrench + m_ft_sensor_wrench)).transpose() << "\n"
-      );
-  }
-  else {
+            << m_ft_sensor_wrench << "\n"
+            << "Torque ext: \n"
+            << tau_ext.transpose() << "\n"
+            << "Feedforward target wrench: \n"
+            << (m_target_wrench + k_p * (m_target_wrench + m_ft_sensor_wrench))
+                   .transpose()
+            << "\n");
+  } else {
     tau_ext = ctrl::VectorND::Zero(Base::m_joint_number);
   }
   // Sum up all torques
@@ -723,16 +769,18 @@ void CombinedImpedanceController::targetWrenchCallback(
 }
 
 void CombinedImpedanceController::ftSensorWrenchCallback(
-  const geometry_msgs::msg::WrenchStamped::SharedPtr wrench)
-{
+    const geometry_msgs::msg::WrenchStamped::SharedPtr wrench) {
 
-  if (std::isnan(wrench->wrench.force.x) || std::isnan(wrench->wrench.force.y) ||
-      std::isnan(wrench->wrench.force.z) || std::isnan(wrench->wrench.torque.x) ||
-      std::isnan(wrench->wrench.torque.y) || std::isnan(wrench->wrench.torque.z))
-  {
-    auto & clock = *get_node()->get_clock();
-    RCLCPP_WARN_STREAM_THROTTLE(get_node()->get_logger(), clock, 3000,
-                                "NaN detected in force-torque sensor wrench. Ignoring input.");
+  if (std::isnan(wrench->wrench.force.x) ||
+      std::isnan(wrench->wrench.force.y) ||
+      std::isnan(wrench->wrench.force.z) ||
+      std::isnan(wrench->wrench.torque.x) ||
+      std::isnan(wrench->wrench.torque.y) ||
+      std::isnan(wrench->wrench.torque.z)) {
+    auto &clock = *get_node()->get_clock();
+    RCLCPP_WARN_STREAM_THROTTLE(
+        get_node()->get_logger(), clock, 3000,
+        "NaN detected in force-torque sensor wrench. Ignoring input.");
     return;
   }
 
@@ -788,10 +836,10 @@ void CombinedImpedanceController::targetJointsCallback(
 
   if (target->position.size() != Base::m_joint_number) {
     auto &clock = *get_node()->get_clock();
-    RCLCPP_WARN_THROTTLE(
-        get_node()->get_logger(), clock, 3000,
-        "Got target joint state with wrong number of joints. Expected: %zu but got %zu",
-        Base::m_joint_number, target->position.size());
+    RCLCPP_WARN_THROTTLE(get_node()->get_logger(), clock, 3000,
+                         "Got target joint state with wrong number of joints. "
+                         "Expected: %zu but got %zu",
+                         Base::m_joint_number, target->position.size());
     return;
   }
 
@@ -800,71 +848,105 @@ void CombinedImpedanceController::targetJointsCallback(
     m_target_joints(i) = target->position[i];
   }
 
-void CombinedImpedanceController::heartbeatCallback(const std_msgs::msg::Bool::SharedPtr msg) {
+  void CombinedImpedanceController::heartbeatCallback(
+      const std_msgs::msg::Bool::SharedPtr msg) {
     bool is_now_safe = msg->data;
 
     {
       std::lock_guard<std::mutex> lock(heartbeat_mutex);
       last_heartbeat_time = get_node()->get_clock()->now();
 
-        if (!initial_heartbeat_received.load()) { // atomic read
-            initial_heartbeat_received.store(true); // atomic write
-            RCLCPP_INFO(get_node()->get_logger(), "Initial collision detection heartbeat received. Controller operational.");
-        }
+      if (!initial_heartbeat_received.load()) { // atomic read
+        initial_heartbeat_received.store(true); // atomic write
+        RCLCPP_INFO(get_node()->get_logger(),
+                    "Initial collision detection heartbeat received. "
+                    "Controller operational.");
+      }
     }
 
     // atomically set is_safe value and get the previous value back.
     bool was_safe = is_safe.exchange(is_now_safe);
 
     if (is_now_safe != was_safe) {
-        if (is_now_safe) {
-            RCLCPP_INFO(get_node()->get_logger(), "Controller state changed to SAFE (no collision).");
-        } else {
-            RCLCPP_WARN(get_node()->get_logger(), "Controller state changed to UNSAFE (collision detected).");
-        }
+      if (is_now_safe) {
+        RCLCPP_INFO(get_node()->get_logger(),
+                    "Controller state changed to SAFE (no collision).");
+      } else {
+        RCLCPP_WARN(get_node()->get_logger(),
+                    "Controller state changed to UNSAFE (collision detected).");
+      }
     }
-}
-  const char* CombinedImpedanceController::toString(RobotMode mode) {
+  }
+  const char *CombinedImpedanceController::toString(RobotMode mode) {
     switch (mode) {
-      case RobotMode::NO_CONTROLLER:       return "NO_CONTROLLER";
-      case RobotMode::DISCONNECTED:        return "DISCONNECTED";
-      case RobotMode::CONFIRM_SAFETY:      return "CONFIRM_SAFETY";
-      case RobotMode::BOOTING:             return "BOOTING";
-      case RobotMode::POWER_OFF:           return "POWER_OFF";
-      case RobotMode::POWER_ON:            return "POWER_ON";
-      case RobotMode::IDLE:                return "IDLE";
-      case RobotMode::BACKDRIVE:           return "BACKDRIVE";
-      case RobotMode::RUNNING:             return "RUNNING";
-      case RobotMode::UPDATING_FIRMWARE:   return "UPDATING_FIRMWARE";
-      default:                             return "UNKNOWN_ROBOT_MODE";
+    case RobotMode::NO_CONTROLLER:
+      return "NO_CONTROLLER";
+    case RobotMode::DISCONNECTED:
+      return "DISCONNECTED";
+    case RobotMode::CONFIRM_SAFETY:
+      return "CONFIRM_SAFETY";
+    case RobotMode::BOOTING:
+      return "BOOTING";
+    case RobotMode::POWER_OFF:
+      return "POWER_OFF";
+    case RobotMode::POWER_ON:
+      return "POWER_ON";
+    case RobotMode::IDLE:
+      return "IDLE";
+    case RobotMode::BACKDRIVE:
+      return "BACKDRIVE";
+    case RobotMode::RUNNING:
+      return "RUNNING";
+    case RobotMode::UPDATING_FIRMWARE:
+      return "UPDATING_FIRMWARE";
+    default:
+      return "UNKNOWN_ROBOT_MODE";
     }
   }
 
-  const char* CombinedImpedanceController::toString(SafetyMode mode) {
+  const char *CombinedImpedanceController::toString(SafetyMode mode) {
     switch (mode) {
-      case SafetyMode::NORMAL:                               return "NORMAL";
-      case SafetyMode::REDUCED:                              return "REDUCED";
-      case SafetyMode::PROTECTIVE_STOP:                      return "PROTECTIVE_STOP";
-      case SafetyMode::RECOVERY:                             return "RECOVERY";
-      case SafetyMode::SAFEGUARD_STOP:                       return "SAFEGUARD_STOP";
-      case SafetyMode::SYSTEM_EMERGENCY_STOP:                return "SYSTEM_EMERGENCY_STOP";
-      case SafetyMode::ROBOT_EMERGENCY_STOP:                 return "ROBOT_EMERGENCY_STOP";
-      case SafetyMode::VIOLATION:                            return "VIOLATION";
-      case SafetyMode::FAULT:                                return "FAULT";
-      case SafetyMode::VALIDATE_JOINT_ID:                    return "VALIDATE_JOINT_ID";
-      case SafetyMode::UNDEFINED_SAFETY_MODE:                return "UNDEFINED_SAFETY_MODE";
-      case SafetyMode::AUTOMATIC_MODE_SAFEGUARD_STOP:        return "AUTOMATIC_MODE_SAFEGUARD_STOP";
-      case SafetyMode::SYSTEM_THREE_POSITION_ENABLING_STOP:  return "SYSTEM_THREE_POSITION_ENABLING_STOP";
-      default:                                               return "UNKNOWN_SAFETY_MODE";
+    case SafetyMode::NORMAL:
+      return "NORMAL";
+    case SafetyMode::REDUCED:
+      return "REDUCED";
+    case SafetyMode::PROTECTIVE_STOP:
+      return "PROTECTIVE_STOP";
+    case SafetyMode::RECOVERY:
+      return "RECOVERY";
+    case SafetyMode::SAFEGUARD_STOP:
+      return "SAFEGUARD_STOP";
+    case SafetyMode::SYSTEM_EMERGENCY_STOP:
+      return "SYSTEM_EMERGENCY_STOP";
+    case SafetyMode::ROBOT_EMERGENCY_STOP:
+      return "ROBOT_EMERGENCY_STOP";
+    case SafetyMode::VIOLATION:
+      return "VIOLATION";
+    case SafetyMode::FAULT:
+      return "FAULT";
+    case SafetyMode::VALIDATE_JOINT_ID:
+      return "VALIDATE_JOINT_ID";
+    case SafetyMode::UNDEFINED_SAFETY_MODE:
+      return "UNDEFINED_SAFETY_MODE";
+    case SafetyMode::AUTOMATIC_MODE_SAFEGUARD_STOP:
+      return "AUTOMATIC_MODE_SAFEGUARD_STOP";
+    case SafetyMode::SYSTEM_THREE_POSITION_ENABLING_STOP:
+      return "SYSTEM_THREE_POSITION_ENABLING_STOP";
+    default:
+      return "UNKNOWN_SAFETY_MODE";
     }
   }
 
-  const char* CombinedImpedanceController::toString(ProgramMode mode) {
+  const char *CombinedImpedanceController::toString(ProgramMode mode) {
     switch (mode) {
-      case ProgramMode::STOPPED:  return "STOPPED";
-      case ProgramMode::PLAYING:  return "PLAYING";
-      case ProgramMode::PAUSED:   return "PAUSED";
-      default:                    return "UNKNOWN_PROGRAM_MODE";
+    case ProgramMode::STOPPED:
+      return "STOPPED";
+    case ProgramMode::PLAYING:
+      return "PLAYING";
+    case ProgramMode::PAUSED:
+      return "PAUSED";
+    default:
+      return "UNKNOWN_PROGRAM_MODE";
     }
   }
 } // namespace combined_impedance_controller
