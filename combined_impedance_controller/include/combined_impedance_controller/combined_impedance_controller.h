@@ -83,8 +83,6 @@ class CombinedImpedanceController
   ctrl::Vector6D m_target_wrench;
   std::string tf_prefix;
  private:
-  ctrl::Vector6D compensateGravity();
-
   void targetWrenchCallback(
       const geometry_msgs::msg::WrenchStamped::SharedPtr wrench);
   void ftSensorWrenchCallback(
@@ -116,11 +114,7 @@ class CombinedImpedanceController
   XBot::MatLogger2::Ptr m_logger;
 #endif
   KDL::Frame m_target_frame;
-  KDL::Frame m_target_frame_old;
   ctrl::Vector6D m_ft_sensor_wrench;
-  ctrl::Vector6D m_error_old;
-  ctrl::Vector6D m_error_dot_old;
-  ctrl::Vector6D m_error_dot_dot_old;
   ctrl::Vector6D m_motion_error_integral;
   std::string m_ft_sensor_ref_link;
   KDL::Frame m_ft_sensor_transform;
@@ -130,19 +124,9 @@ class CombinedImpedanceController
 
   ctrl::MatrixND m_identity;
   ctrl::VectorND m_q_ns; // Null space configuration
-  ctrl::Vector6D m_target_velocity;
 
-  double m_vel_old = 0.0;
-  double current_acc_j0 = 0.0;
   bool m_compensate_dJdq = false;
   bool m_debug_topics = false;
-  /**
-   * Allow users to choose whether to specify their target wrenches in the
-   * end-effector frame (= True) or the base frame (= False). The first one
-   * is easier for explicit task programming, while the second one is more
-   * intuitive for tele-manipulation.
-   */
-  bool m_hand_frame_control;
 
   enum class StateInterfaces
   {

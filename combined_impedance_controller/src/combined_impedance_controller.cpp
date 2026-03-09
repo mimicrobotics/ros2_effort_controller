@@ -3,7 +3,7 @@
 namespace combined_impedance_controller {
 
 CombinedImpedanceController::CombinedImpedanceController()
-    : Base::EffortControllerBase(), m_hand_frame_control(true) {}
+    : Base::EffortControllerBase() {}
 
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
 CombinedImpedanceController::on_init() {
@@ -143,8 +143,6 @@ CombinedImpedanceController::on_configure(
 
   // Set the identity matrix with dimension of the joint space
   m_identity = ctrl::MatrixND::Identity(m_joint_number, m_joint_number);
-  // Make sure sensor wrenches are interpreted correctly
-  // setFtSensorReferenceFrame(Base::m_end_effector_link);
 
   m_target_wrench_subscriber =
       get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
@@ -157,13 +155,6 @@ CombinedImpedanceController::on_configure(
           get_node()->get_name() + std::string("/ft_sensor_wrench"), 10,
           std::bind(&CombinedImpedanceController::ftSensorWrenchCallback, this,
                     std::placeholders::_1));
-
-  // m_ft_sensor_wrench_subscriber =
-  //   get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
-  //     get_node()->get_name() + std::string("/ft_sensor_wrench"),
-  //     10,
-  //     std::bind(&CombinedImpedanceController::ftSensorWrenchCallback, this,
-  //     std::placeholders::_1));
 
   m_target_frame_subscriber =
       get_node()->create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -219,8 +210,6 @@ CombinedImpedanceController::state_interface_configuration() const {
   conf.names.emplace_back(tf_prefix + "gpio/robot_mode");
   conf.names.emplace_back(tf_prefix + "gpio/safety_mode");
   conf.names.emplace_back(tf_prefix + "gpio/program_running");
- // RCLCPP_INFO(get_node()->get_logger(), tf_prefix.c_str());
- // RCLCPP_INFO(get_node()->get_logger(), std::to_string(conf.names.size()).c_str());
   return conf;
 }
 
@@ -238,13 +227,9 @@ CombinedImpedanceController::on_activate(
 
   // Set the target frame to the current frame
   m_target_frame = m_current_frame;
-  m_target_frame_old = m_current_frame;
 
   RCLCPP_INFO(get_node()->get_logger(), "Finished Impedance on_activate");
   
-  m_error_old = ctrl::Vector6D::Zero();
-  m_error_dot_old = ctrl::Vector6D::Zero();
-  m_target_velocity = ctrl::Vector6D::Zero();  
   m_motion_error_integral = ctrl::Vector6D::Zero();
   m_last_time_target_frame_received = get_node()->now();
 
@@ -503,10 +488,7 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
   KDL::JntSpaceInertiaMatrix M(Base::m_joint_number);
   m_dyn_solver->JntToMass(Base::m_joint_positions, M);
   ctrl::Matrix6D Lambda = (jac * M.data.inverse() * jac.transpose()).inverse();
-  // RCLCPP_INFO_STREAM_THROTTLE(
-  //     get_node()->get_logger(), *get_node()->get_clock(), 5000,
-  //     "Inertia matrix: \n" <<
-  //         Lambda<< "\n");
+
   // Compute the motion error
   ctrl::Vector6D motion_error = computeMotionError();
 
@@ -539,21 +521,7 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
   ctrl::Vector6D stiffness_torque = jac.transpose() * (K_d * motion_error);
   ctrl::Vector6D damping_torque = jac.transpose() * (D_d * ( - jac * q_dot));
   ctrl::Vector6D integral_torque = jac.transpose() * (K_i * m_motion_error_integral);
-  // ctrl::Vector6D dot_error = 0.3 * m_dot_error_old + 0.7 * (motion_error - m_error_old) / 0.001;
 
-  // // m_error_old = motion_error;
-  // RCLCPP_INFO_STREAM(
-  //     get_node()->get_logger(), 
-  //     "Commanded pos and vel:" << motion_error.transpose() << " , "
-  //                              << (m_target_velocity - jac * q_dot).transpose()  
-  //       );
-  
-  // RCLCPP_INFO_STREAM_THROTTLE(
-  //     get_node()->get_logger(), *get_node()->get_clock(), 5000,
-  //     "Damping matrix in ee frame: \n"
-  //         << Base::displayInTipLink(D_d, Base::m_end_effector_link) << "\n Force in ee frame: \n"
-  //         << Base::displayInTipLink(force, Base::m_end_effector_link) << "\n Force in base frame: \n"
-  //       );
   // Compute the task torque
   tau_task = stiffness_torque + damping_torque + integral_torque;
 
@@ -651,47 +619,6 @@ double k_p = 1.0;
   }
   // Sum up all torques
   tau += tau_task + tau_null + tau_ext;
-  
-  // // tau = ctrl::VectorND::Zero(Base::m_joint_number);
-  // Base::m_dyn_solver->JntToCoriolis(Base::m_joint_positions,
-  //                                     Base::m_joint_velocities, tau_coriolis);
-  // // Compute error dot and dot dot
-  // ctrl::Vector6D dot_error = 0.5 * (jac * q_dot) + 0.5 * m_error_dot_old;
-  // ctrl::Vector6D dot_dot_error = 0.6 * (dot_error - m_error_dot_old) / 0.001 + 0.4 * m_error_dot_dot_old;
-  // m_error_dot_dot_old = dot_dot_error;
-  // m_error_dot_old = dot_error;
-  // m_error_old = motion_error;
-  // ctrl::Vector6D error_dot_joints = m_target_velocity - jac * q_dot;
-  // ctrl::Vector6D force = K_d * motion_error + D_d * (m_target_velocity - jac * q_dot) - Lambda * dot_dot_error + jac_tran_pseudo_inverse * (tau_coriolis.data + j_tran_lambda_jdot_qdot);
-  // ctrl::Vector6D force2 = K_d * motion_error + D_d * (m_target_velocity - jac * q_dot) + jac_tran_pseudo_inverse * (tau_coriolis.data + j_tran_lambda_jdot_qdot);
-  // ctrl::Vector6D vel = - jac * q_dot;
-  // auto tmp = jac_tran_pseudo_inverse * (tau_coriolis.data + j_tran_lambda_jdot_qdot);
-
-  // // Publish impedance data
-  // ctrl::Vector6D force_ee = Base::displayInTipLink(force, Base::m_end_effector_link);
-  // ctrl::Vector6D force_ee2 = Base::displayInTipLink(force2, Base::m_end_effector_link);
-
-  // static std_msgs::msg::Float64MultiArray impedance_message;
-  // impedance_message.data = {motion_error(2),
-  //                           dot_error(2),
-  //                           dot_dot_error(2),
-  //                           error_dot_joints(2),
-  //                           force_ee(2),
-  //                           force_ee2(2),
-  //                           vel(2),
-  //                           m_target_velocity(2),
-  //                           m_target_frame.p.z(),
-  //                           m_current_frame.p.z(),
-  //                           tmp(2)
-  //                           };
-  // // ctrl::Matrix6D D_ee = Base::displayInTipLink(D_d, Base::m_end_effector_link);
-  // // ctrl::Vector6D force_ee = Base::displayInTipLink(force, Base::m_end_effector_link);
-  // // impedance_message.data = {D_ee(2,2),force_ee(2),D_ee(0,0),D_ee(1,1),D_ee(2,2),D_ee(3,3),D_ee(4,4),D_ee(5,5),
-  // //                          force_ee(0),force_ee(1),force_ee(2),force_ee(3),force_ee(4),force_ee(5)};
-  // m_data_impedance_publisher->publish(impedance_message);
-
-
-
   return tau;
 }
 
@@ -764,24 +691,6 @@ void CombinedImpedanceController::targetFrameCallback(
                  KDL::Vector(target->pose.position.x, target->pose.position.y,
                              target->pose.position.z));
 
-  // // Compute target velocity
-  // constexpr double dt = 0.001; // control period
-
-  // if ((get_node()->now() - m_last_time_target_frame_received).nanoseconds() < 2e6) {
-  //   KDL::Twist delta_twist = KDL::diff(m_target_frame_old, m_target_frame) / dt;
-  //   m_target_velocity[0] = delta_twist.vel.x();
-  //   m_target_velocity[1] = delta_twist.vel.y();
-  //   m_target_velocity[2] = delta_twist.vel.z();
-  //   m_target_velocity[3] = delta_twist.rot.x();
-  //   m_target_velocity[4] = delta_twist.rot.y();
-  //   m_target_velocity[5] = delta_twist.rot.z();
-  // } 
-  // else if{
-  //   ;// m_target_velocity = ctrl::Vector6D::Zero();  
-  // }
-
-  // m_target_frame_old = m_target_frame;
-  m_target_velocity = ctrl::Vector6D::Zero();
   m_last_time_target_frame_received = get_node()->now();
 }
 
