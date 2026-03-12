@@ -213,17 +213,11 @@ CombinedImpedanceController::on_configure(
           std::bind(&CombinedImpedanceController::targetFrameCallback, this,
                     std::placeholders::_1));
 
-  m_target_joints_subscriber =
-      get_node()->create_subscription<sensor_msgs::msg::JointState>(
-          std::string("/target_joint_state"), 1,
-          std::bind(&CombinedImpedanceController::targetJointsCallback, this,
-                    std::placeholders::_1));
-
   m_target_joint_trajectory_subscriber =
-      get_node()->create_subscription<sensor_msgs::msg::JointState>(
+      get_node()->create_subscription<trajectory_msgs::msg::JointTrajectory>(
           std::string("/target_joint_trajectory"), 1,
-          std::bind(&CombinedImpedanceController::targetJointTrajectoryCallback,
-                    this, std::placeholders::_1));
+          std::bind(&CombinedImpedanceController::jointTrajectoryCallback, this,
+                    std::placeholders::_1));
 
   m_data_publisher = get_node()->create_publisher<debug_msg::msg::Debug>(
       get_node()->get_name() + std::string("/data"), 1);
@@ -312,7 +306,8 @@ CombinedImpedanceController::on_activate(
 
   // Set the target frame to the current frame, same for target joints
   m_target_frame = m_current_frame;
-  m_target_joints = Base::m_joint_positions.data;
+  m_desired_joint_positions_ = Base::m_joint_positions.data;
+  m_desired_joint_velocities_ = ctrl::VectorND::Zero(Base::m_joint_number);
 
   RCLCPP_INFO(get_node()->get_logger(), "Finished Impedance on_activate");
 
@@ -323,18 +318,16 @@ CombinedImpedanceController::on_activate(
   m_target_wrench = ctrl::Vector6D::Zero();
   m_ft_sensor_wrench = ctrl::Vector6D::Zero();
 
-  std::lock_guard<std::mutex> lock(heartbeat_mutex);
-  last_heartbeat_time = get_node()->get_clock()->now();
+  {
+    std::lock_guard<std::mutex> lock(heartbeat_mutex);
+    last_heartbeat_time = get_node()->get_clock()->now();
+  }
 
   // initialize controller state
   controller_state = ControllerState::RUNNING;
   control_mode =
       ControlMode::CARTESIAN; // default to cartesian mode on activation
   mimic_robot_mode = MimicRobotMode::MOVE;
-#if LOGGING
-  m_logger = XBot::MatLogger2::MakeLogger("/tmp/cart_impedance_log");
-  m_logger->set_buffer_mode(XBot::VariableBuffer::Mode::circular_buffer);
-#endif
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::SUCCESS;
 }
@@ -373,6 +366,10 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
   // Write final commands to the hardware interface
   Base::writeJointEffortCmds();
 
+  if (control_mode == ControlMode::JOINT_TRAJECTORY) {
+    updateNextTrajectoryPoint(period);
+  }
+
   return controller_interface::return_type::OK;
 }
 
@@ -397,6 +394,49 @@ geometry_msgs::msg::PoseStamped toPoseStamped(const KDL::Frame &frame,
   msg.pose.orientation.w = w;
 
   return msg;
+}
+
+void CombinedImpedanceController::updateNextTrajectoryPoint(
+    const rclcpp::Duration &period) {
+  RCLCPP_DEBUG_THROTTLE(
+      get_node()->get_logger(), *get_node()->get_clock(), 2000,
+      "Updating trajectory point. Elapsed time: %f seconds", traj_elapsed_);
+  std::lock_guard<std::mutex> lock(traj_mutex_);
+  if (!traj_active_ || controller_state != ControllerState::RUNNING) {
+    return;
+  }
+  traj_elapsed_ += 0.4 * period.seconds();
+
+  if (traj_elapsed_ >= traj_times_.back()) {
+    // Trajectory complete — hold final waypoint
+    m_desired_joint_positions_ = traj_positions_.back();
+    m_desired_joint_velocities_ = ctrl::VectorND::Zero(Base::m_joint_number);
+    traj_active_ = false;
+    RCLCPP_INFO(get_node()->get_logger(),
+                "CombinedImpedanceController: Homing trajectory complete, "
+                "holding final position.");
+  } else {
+    // Find bounding segment: idx0 is the waypoint just before traj_elapsed_,
+    // idx1 is the waypoint just after it.
+    auto it =
+        std::upper_bound(traj_times_.begin(), traj_times_.end(), traj_elapsed_);
+    const size_t idx1 =
+        static_cast<size_t>(std::distance(traj_times_.begin(), it));
+    const size_t idx0 = idx1 - 1;
+    const double alpha = (traj_elapsed_ - traj_times_[idx0]) /
+                         (traj_times_[idx1] - traj_times_[idx0]);
+
+    // Linear interpolation between the two bounding waypoints
+    m_desired_joint_positions_ =
+        traj_positions_[idx0] +
+        alpha * (traj_positions_[idx1] - traj_positions_[idx0]);
+    m_desired_joint_velocities_ =
+        traj_velocities_[idx0] +
+        alpha * (traj_velocities_[idx1] - traj_velocities_[idx0]);
+
+    RCLCPP_INFO_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(),
+                         1000, "Setting waypoint:  %u - %u", idx0, idx1);
+  }
 }
 
 void CombinedImpedanceController::updateControllerState() {
@@ -503,7 +543,9 @@ void CombinedImpedanceController::freezeDesiredPoses() {
   frozen_pose.pose = m_current_frame;
   m_target_frame = m_current_frame;
   m_cart_motion_error_integral = ctrl::Vector6D::Zero();
-  m_target_joints = Base::m_joint_positions.data;
+  m_desired_joint_positions_ = Base::m_joint_positions.data;
+  ;
+  m_desired_joint_velocities_ = ctrl::VectorND::Zero(Base::m_joint_number);
   m_joint_motion_error_integral = ctrl::VectorND::Zero(Base::m_joint_number);
 }
 
@@ -575,10 +617,11 @@ ctrl::Vector6D CombinedImpedanceController::computeCartMotionError() {
 ctrl::VectorND CombinedImpedanceController::computeJointMotionError() {
   // Compute the joint space error between the current and the target
   // configuration
-  ctrl::VectorND error = m_target_joints - Base::m_joint_positions.data;
+  ctrl::VectorND error =
+      m_desired_joint_positions_ - Base::m_joint_positions.data;
 
   // Clamp the error to avoid excessive torques
-  const double max_joint_error = 0.5; // TODO: tune this parameter
+  const double max_joint_error = 0.3; // TODO: tune this parameter
   for (auto i = 0; i < error.size(); ++i) {
     error(i) = std::clamp(error(i), -max_joint_error, max_joint_error);
   }
@@ -586,6 +629,14 @@ ctrl::VectorND CombinedImpedanceController::computeJointMotionError() {
 }
 
 ctrl::VectorND CombinedImpedanceController::computeTorque() {
+  RCLCPP_DEBUG_THROTTLE(
+      get_node()->get_logger(), *get_node()->get_clock(), 2000,
+      "Compute torque in mode: %s, controller state: %s, robot mode: %s, "
+      "safety mode: %s",
+      control_mode == ControlMode::JOINT_TRAJECTORY ? "JOINT" : "CARTESIAN",
+      controller_state == ControllerState::RUNNING ? "RUNNING" : "STOPPED",
+      robot_mode == RobotMode::RUNNING ? "RUNNING" : "STOPPED",
+      safety_mode == SafetyMode::NORMAL ? "SAFE" : "UNSAFE");
   // Redefine joints velocities in Eigen format
   ctrl::VectorND q = Base::m_joint_positions.data;
   ctrl::VectorND q_dot = Base::m_joint_velocities.data;
@@ -622,7 +673,7 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
   tau_joint.setZero();
   tau_null.setZero();
 
-  if (control_mode == ControlMode::JOINT) {
+  if (control_mode == ControlMode::JOINT_TRAJECTORY) {
     // ── Mode heartbeat watchdog ──────────────────────────────────────────
     // If in JOINT and heartbeat is lost for >200ms, auto-revert
     // to CARTESIAN. Lock ordering: mode_heartbeat_mutex_ first, then
@@ -651,6 +702,11 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
 
     // Compute the motion error
     const ctrl::VectorND motion_error = computeJointMotionError();
+    RCLCPP_INFO_STREAM_THROTTLE(get_node()->get_logger(),
+                                *get_node()->get_clock(), 250,
+                                "Motion error: \n"
+                                    << motion_error.transpose() << "\n");
+
     // Compute the stiffness and damping in the joint space
     const ctrl::MatrixND K_d = m_joint_stiffness;
     const ctrl::MatrixND D_d = m_joint_damping;
@@ -667,7 +723,7 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
     const ctrl::VectorND integral_torque = K_i * m_joint_motion_error_integral;
 
     // Compute the task torque
-    tau_task = stiffness_torque + damping_torque + integral_torque;
+    tau_task = stiffness_torque + damping_torque;
   } else if (control_mode == ControlMode::CARTESIAN) {
     // Compute the motion error
     const ctrl::Vector6D motion_error = computeCartMotionError();
@@ -880,30 +936,6 @@ void CombinedImpedanceController::targetFrameCallback(
                              target->pose.position.z));
 }
 
-void CombinedImpedanceController::targetJointsCallback(
-    const sensor_msgs::msg::JointState::SharedPtr target) {
-  if (controller_state != ControllerState::RUNNING) {
-    return; // Don't accept new poses while in a non-normal state
-  }
-  if (control_mode != ControlMode::JOINT) {
-    return; // Don't accept new poses if not in joint mode
-  }
-
-  if (target->position.size() != Base::m_joint_number) {
-    auto &clock = *get_node()->get_clock();
-    RCLCPP_WARN_THROTTLE(get_node()->get_logger(), clock, 3000,
-                         "Got target joint state with wrong number of joints. "
-                         "Expected: %zu but got %zu",
-                         Base::m_joint_number, target->position.size());
-    return;
-  }
-
-  m_target_joints = ctrl::VectorND::Zero(Base::m_joint_number);
-  for (size_t i = 0; i < Base::m_joint_number; ++i) {
-    m_target_joints(i) = target->position[i];
-  }
-}
-
 void CombinedImpedanceController::heartbeatCallback(
     const std_msgs::msg::Bool::SharedPtr msg) {
   bool is_now_safe = msg->data;
@@ -937,30 +969,41 @@ void CombinedImpedanceController::heartbeatCallback(
 bool CombinedImpedanceController::modeSwitchCallback(
     std_srvs::srv::SetBool::Request::SharedPtr req,
     std_srvs::srv::SetBool::Response::SharedPtr res) {
-  std::lock_guard<std::mutex> lock(traj_mutex_);
+
+  // Lock ordering: always mode_heartbeat_mutex_ before traj_mutex_ (or
+  // acquire them sequentially, never nest the other way) to match the
+  // ordering in computeTorque() and avoid deadlocks.
 
   if (req->data) {
-    // Request JOINT_TRAJECTORY
-    if (control_mode == ControlMode::JOINT) {
-      res->success = true;
-      res->message = "Already in JOINT mode.";
-      return true;
+    {
+      std::lock_guard<std::mutex> lock(traj_mutex_);
+      // Request JOINT_TRAJECTORY
+      if (control_mode == ControlMode::JOINT_TRAJECTORY) {
+        res->success = true;
+        res->message = "Already in JOINT_TRAJECTORY mode.";
+        RCLCPP_INFO(get_node()->get_logger(), "modeSwitchCallback done.");
+        return true;
+      }
+      traj_active_ =
+          false; // No trajectory yet — just holding current position.
+      freezeDesiredPoses();
+      // Switch CARTESIAN -> JOINT_TRAJECTORY
+      control_mode = ControlMode::JOINT_TRAJECTORY;
     }
-    // Switch CARTESIAN -> JOINT
-    freezeDesiredPoses();
-    control_mode = ControlMode::JOINT;
-    // Start the watchdog clock.
+    // Start the watchdog clock (traj_mutex_ released first to respect
+    // ordering).
     {
       std::lock_guard<std::mutex> hb_lock(mode_heartbeat_mutex_);
       last_mode_heartbeat_time_ = get_node()->get_clock()->now();
       mode_heartbeat_received_.store(true);
     }
-    RCLCPP_INFO(
-        get_node()->get_logger(),
-        "CombinedImpedanceController: Switched to JOINT mode (via service).");
+    RCLCPP_INFO(get_node()->get_logger(),
+                "CombinedImpedanceController: Switched to JOINT_TRAJECTORY "
+                "mode (via service).");
     res->success = true;
-    res->message = "Switched to JOINT mode.";
+    res->message = "Switched to JOINT_TRAJECTORY mode.";
   } else {
+    std::lock_guard<std::mutex> lock(traj_mutex_);
     // Switch JOINT -> CARTESIAN
     control_mode = ControlMode::CARTESIAN;
     mode_heartbeat_received_.store(false);
@@ -971,113 +1014,170 @@ bool CombinedImpedanceController::modeSwitchCallback(
     res->success = true;
     res->message = "Switched to CARTESIAN mode.";
   }
+
   return true;
 }
 
 void CombinedImpedanceController::jointTrajectoryCallback(
     const trajectory_msgs::msg::JointTrajectory::SharedPtr msg) {
-
   // Empty trajectory = cancel active trajectory (hold current joint positions).
-  // Mode switching is handled by the /panda_dual/controller_mode topic.
+  // Mode switching is handled by the controller_mode_switch service.
   if (msg->points.empty()) {
     std::lock_guard<std::mutex> lock(traj_mutex_);
-    traj_active_ = false;
-    ROS_INFO("CombinedImpedanceController: Cancelling active trajectory.");
+    RCLCPP_INFO(get_node()->get_logger(),
+                "CombinedImpedanceController: Cancelling active trajectory.");
     return;
   }
 
   // Reject trajectory if not in JOINT_TRAJECTORY mode
   {
     std::lock_guard<std::mutex> lock(traj_mutex_);
-    if (control_mode == ControlMode::JOINT) {
-      ROS_WARN("CombinedImpedanceController: Trajectory rejected "
-               "-- not in JOINT_TRAJECTORY mode.");
+    if (control_mode != ControlMode::JOINT_TRAJECTORY) {
+      RCLCPP_WARN(get_node()->get_logger(),
+                  "CombinedImpedanceController: Trajectory rejected "
+                  "-- not in JOINT_TRAJECTORY mode.");
       return;
     }
   }
 
-  void CombinedImpedanceController::modeHeartbeatCallback(
-      const std_msgs::msg::Empty::SharedPtr /*msg*/) {
-    std::lock_guard<std::mutex> lock(mode_heartbeat_mutex_);
-    last_mode_heartbeat_time_ = get_node()->get_clock()->now();
-
-    if (!mode_heartbeat_received_.load()) {
-      mode_heartbeat_received_.store(true);
+  // Build an index map from this controller's joints to the message joints.
+  // For each joint in controller_joint_names we find the matching index in
+  // msg->joint_names so we can extract the correct positions.
+  const auto controller_joint_names = Base::m_joint_names;
+  std::vector<int> msg_index_for_controller_joint(Base::m_joint_number, -1);
+  for (size_t i = 0; i < controller_joint_names.size(); ++i) {
+    for (size_t j = 0; j < msg->joint_names.size(); ++j) {
+      if (msg->joint_names[j] == controller_joint_names[i]) {
+        msg_index_for_controller_joint[i] = static_cast<int>(j);
+        break;
+      }
+    }
+    if (msg_index_for_controller_joint[i] < 0) {
+      RCLCPP_WARN(get_node()->get_logger(),
+                  "CombinedImpedanceController: Joint '%s' not found in "
+                  "trajectory message. Ignoring trajectory.",
+                  controller_joint_names[i].c_str());
+      return;
     }
   }
 
-  const char *CombinedImpedanceController::toString(RobotMode mode) {
-    switch (mode) {
-    case RobotMode::NO_CONTROLLER:
-      return "NO_CONTROLLER";
-    case RobotMode::DISCONNECTED:
-      return "DISCONNECTED";
-    case RobotMode::CONFIRM_SAFETY:
-      return "CONFIRM_SAFETY";
-    case RobotMode::BOOTING:
-      return "BOOTING";
-    case RobotMode::POWER_OFF:
-      return "POWER_OFF";
-    case RobotMode::POWER_ON:
-      return "POWER_ON";
-    case RobotMode::IDLE:
-      return "IDLE";
-    case RobotMode::BACKDRIVE:
-      return "BACKDRIVE";
-    case RobotMode::RUNNING:
-      return "RUNNING";
-    case RobotMode::UPDATING_FIRMWARE:
-      return "UPDATING_FIRMWARE";
-    default:
-      return "UNKNOWN_ROBOT_MODE";
+  std::lock_guard<std::mutex> lock(traj_mutex_);
+  const size_t n = msg->points.size();
+  traj_positions_.resize(n);
+  traj_velocities_.resize(n);
+  traj_times_.resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    const auto &pt = msg->points[i];
+    const bool has_vel = pt.velocities.size() >= msg->joint_names.size();
+    traj_times_[i] = rclcpp::Duration(pt.time_from_start).seconds();
+    traj_positions_[i] = ctrl::VectorND::Zero(Base::m_joint_number);
+    traj_velocities_[i] = ctrl::VectorND::Zero(Base::m_joint_number);
+    for (size_t j = 0; j < Base::m_joint_number; ++j) {
+      traj_positions_[i](j) = pt.positions[msg_index_for_controller_joint[j]];
+      traj_velocities_[i](j) =
+          has_vel ? pt.velocities[msg_index_for_controller_joint[j]] : 0.0;
     }
   }
 
-  const char *CombinedImpedanceController::toString(SafetyMode mode) {
-    switch (mode) {
-    case SafetyMode::NORMAL:
-      return "NORMAL";
-    case SafetyMode::REDUCED:
-      return "REDUCED";
-    case SafetyMode::PROTECTIVE_STOP:
-      return "PROTECTIVE_STOP";
-    case SafetyMode::RECOVERY:
-      return "RECOVERY";
-    case SafetyMode::SAFEGUARD_STOP:
-      return "SAFEGUARD_STOP";
-    case SafetyMode::SYSTEM_EMERGENCY_STOP:
-      return "SYSTEM_EMERGENCY_STOP";
-    case SafetyMode::ROBOT_EMERGENCY_STOP:
-      return "ROBOT_EMERGENCY_STOP";
-    case SafetyMode::VIOLATION:
-      return "VIOLATION";
-    case SafetyMode::FAULT:
-      return "FAULT";
-    case SafetyMode::VALIDATE_JOINT_ID:
-      return "VALIDATE_JOINT_ID";
-    case SafetyMode::UNDEFINED_SAFETY_MODE:
-      return "UNDEFINED_SAFETY_MODE";
-    case SafetyMode::AUTOMATIC_MODE_SAFEGUARD_STOP:
-      return "AUTOMATIC_MODE_SAFEGUARD_STOP";
-    case SafetyMode::SYSTEM_THREE_POSITION_ENABLING_STOP:
-      return "SYSTEM_THREE_POSITION_ENABLING_STOP";
-    default:
-      return "UNKNOWN_SAFETY_MODE";
-    }
-  }
+  // Seed desired positions from the ACTUAL robot state rather than from
+  // traj_positions_[0]. traj_positions_[0] comes from the Python-side
+  // joint-state snapshot which was taken several milliseconds before this
+  // callback fires (planning time + bridge latency). Seeding from the live
+  // hardware state guarantees zero initial PD error, eliminating the torque
+  // spike (and resulting jerk) that would otherwise scale with the P gain.
+  m_desired_joint_positions_ = Base::m_joint_positions.data;
+  m_desired_joint_velocities_ = ctrl::VectorND::Zero(Base::m_joint_number);
+  traj_elapsed_ = 0.0;
+  traj_active_ = true;
 
-  const char *CombinedImpedanceController::toString(ProgramMode mode) {
-    switch (mode) {
-    case ProgramMode::STOPPED:
-      return "STOPPED";
-    case ProgramMode::PLAYING:
-      return "PLAYING";
-    case ProgramMode::PAUSED:
-      return "PAUSED";
-    default:
-      return "UNKNOWN_PROGRAM_MODE";
-    }
+  RCLCPP_INFO(get_node()->get_logger(),
+              "CombinedImpedanceController: Accepted trajectory with %zu "
+              "points. Target set to last waypoint.",
+              msg->points.size());
+}
+
+void CombinedImpedanceController::modeHeartbeatCallback(
+    const std_msgs::msg::Empty::SharedPtr /*msg*/) {
+  std::lock_guard<std::mutex> lock(mode_heartbeat_mutex_);
+  last_mode_heartbeat_time_ = get_node()->get_clock()->now();
+
+  if (!mode_heartbeat_received_.load()) {
+    mode_heartbeat_received_.store(true);
   }
+}
+
+const char *CombinedImpedanceController::toString(RobotMode mode) {
+  switch (mode) {
+  case RobotMode::NO_CONTROLLER:
+    return "NO_CONTROLLER";
+  case RobotMode::DISCONNECTED:
+    return "DISCONNECTED";
+  case RobotMode::CONFIRM_SAFETY:
+    return "CONFIRM_SAFETY";
+  case RobotMode::BOOTING:
+    return "BOOTING";
+  case RobotMode::POWER_OFF:
+    return "POWER_OFF";
+  case RobotMode::POWER_ON:
+    return "POWER_ON";
+  case RobotMode::IDLE:
+    return "IDLE";
+  case RobotMode::BACKDRIVE:
+    return "BACKDRIVE";
+  case RobotMode::RUNNING:
+    return "RUNNING";
+  case RobotMode::UPDATING_FIRMWARE:
+    return "UPDATING_FIRMWARE";
+  default:
+    return "UNKNOWN_ROBOT_MODE";
+  }
+}
+
+const char *CombinedImpedanceController::toString(SafetyMode mode) {
+  switch (mode) {
+  case SafetyMode::NORMAL:
+    return "NORMAL";
+  case SafetyMode::REDUCED:
+    return "REDUCED";
+  case SafetyMode::PROTECTIVE_STOP:
+    return "PROTECTIVE_STOP";
+  case SafetyMode::RECOVERY:
+    return "RECOVERY";
+  case SafetyMode::SAFEGUARD_STOP:
+    return "SAFEGUARD_STOP";
+  case SafetyMode::SYSTEM_EMERGENCY_STOP:
+    return "SYSTEM_EMERGENCY_STOP";
+  case SafetyMode::ROBOT_EMERGENCY_STOP:
+    return "ROBOT_EMERGENCY_STOP";
+  case SafetyMode::VIOLATION:
+    return "VIOLATION";
+  case SafetyMode::FAULT:
+    return "FAULT";
+  case SafetyMode::VALIDATE_JOINT_ID:
+    return "VALIDATE_JOINT_ID";
+  case SafetyMode::UNDEFINED_SAFETY_MODE:
+    return "UNDEFINED_SAFETY_MODE";
+  case SafetyMode::AUTOMATIC_MODE_SAFEGUARD_STOP:
+    return "AUTOMATIC_MODE_SAFEGUARD_STOP";
+  case SafetyMode::SYSTEM_THREE_POSITION_ENABLING_STOP:
+    return "SYSTEM_THREE_POSITION_ENABLING_STOP";
+  default:
+    return "UNKNOWN_SAFETY_MODE";
+  }
+}
+
+const char *CombinedImpedanceController::toString(ProgramMode mode) {
+  switch (mode) {
+  case ProgramMode::STOPPED:
+    return "STOPPED";
+  case ProgramMode::PLAYING:
+    return "PLAYING";
+  case ProgramMode::PAUSED:
+    return "PAUSED";
+  default:
+    return "UNKNOWN_PROGRAM_MODE";
+  }
+}
 } // namespace combined_impedance_controller
 
 // Pluginlib

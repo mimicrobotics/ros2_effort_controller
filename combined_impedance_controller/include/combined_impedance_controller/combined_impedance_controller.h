@@ -10,8 +10,8 @@
 #include "effort_controller_base/Utility.h"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/wrench_stamped.hpp"
-#include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
+#include "trajectory_msgs/msg/joint_trajectory.hpp"
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/float64.hpp>
@@ -107,20 +107,21 @@ private:
       const geometry_msgs::msg::WrenchStamped::SharedPtr wrench);
   void
   targetFrameCallback(const geometry_msgs::msg::PoseStamped::SharedPtr target);
-  void
-  targetJointsCallback(const sensor_msgs::msg::JointState::SharedPtr target);
+  void jointTrajectoryCallback(
+      const trajectory_msgs::msg::JointTrajectory::SharedPtr target);
   void heartbeatCallback(const std_msgs::msg::Bool::SharedPtr msg);
   ctrl::Vector6D computeCartMotionError();
   ctrl::VectorND computeJointMotionError();
   void freezeDesiredPoses();
+  void updateNextTrajectoryPoint(const rclcpp::Duration &period);
 
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr m_heartbeat_subscriber;
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr
       m_target_wrench_subscriber;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr
       m_target_frame_subscriber;
-  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr
-      m_target_joints_subscriber;
+  rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr
+      m_target_joint_trajectory_subscriber;
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr
       m_ft_sensor_subscriber;
   rclcpp::Publisher<debug_msg::msg::Debug>::SharedPtr m_data_publisher;
@@ -148,6 +149,13 @@ private:
   rclcpp::Time last_mode_heartbeat_time_;
   std::mutex mode_heartbeat_mutex_;
   std::atomic<bool> mode_heartbeat_received_{false};
+
+  // Trajectory execution state
+  std::vector<ctrl::VectorND> traj_positions_;
+  std::vector<ctrl::VectorND> traj_velocities_;
+  std::vector<double> traj_times_;
+  double traj_elapsed_{0.0};
+  bool traj_active_{false};
   std::mutex traj_mutex_; ///< Guards traj_* and control_mode_.
   static constexpr double kModeHeartbeatTimeout{0.3}; ///< 300ms watchdog.
 
@@ -167,7 +175,8 @@ private:
   // ================================================
   // = Member variables for joint impedance control =
   // ================================================
-  ctrl::VectorND m_target_joints;
+  ctrl::VectorND m_desired_joint_positions_{};
+  ctrl::VectorND m_desired_joint_velocities_{};
   ctrl::VectorND m_joint_motion_error_integral;
 
   // ===========================
@@ -184,7 +193,7 @@ private:
 
   enum class ControlMode {
     CARTESIAN,
-    JOINT,
+    JOINT_TRAJECTORY,
   };
   ControlMode control_mode;
 
