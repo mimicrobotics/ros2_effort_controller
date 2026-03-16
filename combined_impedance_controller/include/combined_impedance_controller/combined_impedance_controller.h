@@ -112,6 +112,10 @@ private:
   void heartbeatCallback(const std_msgs::msg::Bool::SharedPtr msg);
   ctrl::Vector6D computeCartMotionError();
   ctrl::VectorND computeJointMotionError();
+  ctrl::VectorND computeJointTrajectoryTaskTorque(const ctrl::VectorND &q_dot);
+  ctrl::VectorND computeCartesianTaskTorque(const ctrl::MatrixND &jac,
+                                            const ctrl::VectorND &q_dot,
+                                            const ctrl::Matrix6D &Lambda);
   void freezeDesiredPoses();
   void updateNextTrajectoryPoint(const rclcpp::Duration &period);
 
@@ -177,7 +181,17 @@ private:
   // ================================================
   ctrl::VectorND m_desired_joint_positions_{};
   ctrl::VectorND m_desired_joint_velocities_{};
-  ctrl::VectorND m_joint_motion_error_integral;
+  ctrl::VectorND m_joint_motion_error_integral{};
+
+  // ========================================
+  // = Member variables for effort blending =
+  // ========================================
+  ctrl::VectorND m_last_tau_task{};
+  ctrl::VectorND m_blend_tau_ff_{};
+  bool blend_active_{false};  ///< Protected by traj_mutex_.
+  double blend_elapsed_{0.0}; ///< Seconds since blend started.
+  static constexpr double kBlendTimeConstant{
+      0.05}; ///< 50 ms exponential decay.
 
   // ===========================
   // = Common member variables =

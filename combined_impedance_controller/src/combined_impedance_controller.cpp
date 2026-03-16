@@ -308,6 +308,7 @@ CombinedImpedanceController::on_activate(
   m_target_frame = m_current_frame;
   m_desired_joint_positions_ = Base::m_joint_positions.data;
   m_desired_joint_velocities_ = ctrl::VectorND::Zero(Base::m_joint_number);
+  m_blend_tau_ff_ = ctrl::VectorND::Zero(Base::m_joint_number);
 
   RCLCPP_INFO(get_node()->get_logger(), "Finished Impedance on_activate");
 
@@ -405,7 +406,7 @@ void CombinedImpedanceController::updateNextTrajectoryPoint(
   if (!traj_active_ || controller_state != ControllerState::RUNNING) {
     return;
   }
-  traj_elapsed_ += 0.4 * period.seconds();
+  traj_elapsed_ += 0.6 * period.seconds();
 
   if (traj_elapsed_ >= traj_times_.back()) {
     // Trajectory complete — hold final waypoint
@@ -435,7 +436,7 @@ void CombinedImpedanceController::updateNextTrajectoryPoint(
         alpha * (traj_velocities_[idx1] - traj_velocities_[idx0]);
 
     RCLCPP_INFO_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(),
-                         1000, "Setting waypoint:  %u - %u", idx0, idx1);
+                         1000, "Setting waypoint:  %lu - %lu", idx0, idx1);
   }
 }
 
@@ -544,7 +545,7 @@ void CombinedImpedanceController::freezeDesiredPoses() {
   m_target_frame = m_current_frame;
   m_cart_motion_error_integral = ctrl::Vector6D::Zero();
   m_desired_joint_positions_ = Base::m_joint_positions.data;
-  ;
+  m_blend_tau_ff_ = ctrl::VectorND::Zero(Base::m_joint_number);
   m_desired_joint_velocities_ = ctrl::VectorND::Zero(Base::m_joint_number);
   m_joint_motion_error_integral = ctrl::VectorND::Zero(Base::m_joint_number);
 }
@@ -628,6 +629,96 @@ ctrl::VectorND CombinedImpedanceController::computeJointMotionError() {
   return error;
 }
 
+ctrl::VectorND CombinedImpedanceController::computeJointTrajectoryTaskTorque(
+    const ctrl::VectorND &q_dot) {
+  // ── Mode heartbeat watchdog ──────────────────────────────────────────
+  // If in JOINT and heartbeat is lost for >200ms, auto-revert
+  // to CARTESIAN. Lock ordering: mode_heartbeat_mutex_ first, then
+  // traj_mutex_ (never nested the other way) to avoid deadlock.
+  bool mode_hb_timed_out = false;
+  {
+    std::lock_guard<std::mutex> mhb_lock(mode_heartbeat_mutex_);
+    if (mode_heartbeat_received_.load()) {
+      const auto time = get_node()->get_clock()->now();
+      const double mode_hb_diff = (time - last_mode_heartbeat_time_).seconds();
+      if (mode_hb_diff > kModeHeartbeatTimeout) {
+        mode_hb_timed_out = true;
+      }
+    }
+  }
+  if (mode_hb_timed_out) {
+    std::lock_guard<std::mutex> tlock(traj_mutex_);
+    control_mode = ControlMode::CARTESIAN;
+    mode_heartbeat_received_.store(false);
+    RCLCPP_ERROR(get_node()->get_logger(),
+                 "CombinedImpedanceController: Mode heartbeat timeout. "
+                 "Auto-switching to CARTESIAN.");
+    freezeDesiredPoses();
+  }
+
+  // Compute the motion error
+  const ctrl::VectorND motion_error = computeJointMotionError();
+  RCLCPP_INFO_STREAM_THROTTLE(get_node()->get_logger(),
+                              *get_node()->get_clock(), 250,
+                              "Motion error: \n"
+                                  << motion_error.transpose() << "\n");
+
+  // Compute the stiffness and damping in the joint space
+  const ctrl::MatrixND K_d = m_joint_stiffness;
+  const ctrl::MatrixND D_d = m_joint_damping;
+  const ctrl::MatrixND K_i = m_joint_integral_gain;
+
+  // Anti-windup: clamp the integral error to prevent excessive torques
+  m_joint_motion_error_integral
+      << (m_joint_motion_error_integral + 0.1 * motion_error)
+             .cwiseMax(-0.1)
+             .cwiseMin(0.1);
+
+  const ctrl::VectorND stiffness_torque = K_d * motion_error;
+  const ctrl::VectorND damping_torque = D_d * (-q_dot);
+  const ctrl::VectorND integral_torque = K_i * m_joint_motion_error_integral;
+
+  // Compute the task torque
+  return stiffness_torque + damping_torque;
+}
+
+ctrl::VectorND CombinedImpedanceController::computeCartesianTaskTorque(
+    const ctrl::MatrixND &jac, const ctrl::VectorND &q_dot,
+    const ctrl::Matrix6D &Lambda) {
+  // Compute the motion error
+  const ctrl::Vector6D motion_error = computeCartMotionError();
+
+  // Compute the stiffness and damping in the base link
+  const auto base_link_stiffness =
+      Base::displayInBaseLink(m_cartesian_stiffness, Base::m_end_effector_link);
+
+  const ctrl::Matrix6D K_d = base_link_stiffness;
+  // Eigen::VectorXd damping_correction = 3.0 * Eigen::VectorXd::Ones(6);
+  const ctrl::Matrix6D D_d =
+      compute_correct_damping(Lambda, K_d, m_damping_ratio);
+  const ctrl::Matrix6D K_i = m_cartesian_integral_gain;
+
+  // Anti-windup: clamp the integral error to prevent excessive torques
+  m_cart_motion_error_integral.head(3)
+      << (m_cart_motion_error_integral.head(3) + 0.1 * motion_error.head(3))
+             .cwiseMax(-0.1)
+             .cwiseMin(0.1);
+  m_cart_motion_error_integral.tail(3)
+      << (m_cart_motion_error_integral.tail(3) + 0.1 * motion_error.tail(3))
+             .cwiseMax(-0.05)
+             .cwiseMin(0.05);
+
+  const ctrl::Vector6D stiffness_torque =
+      jac.transpose() * (K_d * motion_error);
+  const ctrl::Vector6D damping_torque =
+      jac.transpose() * (D_d * (-jac * q_dot));
+  const ctrl::Vector6D integral_torque =
+      jac.transpose() * (K_i * m_cart_motion_error_integral);
+
+  // Compute the task torque
+  return stiffness_torque + damping_torque + integral_torque;
+}
+
 ctrl::VectorND CombinedImpedanceController::computeTorque() {
   RCLCPP_DEBUG_THROTTLE(
       get_node()->get_logger(), *get_node()->get_clock(), 2000,
@@ -674,101 +765,24 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
   tau_null.setZero();
 
   if (control_mode == ControlMode::JOINT_TRAJECTORY) {
-    // ── Mode heartbeat watchdog ──────────────────────────────────────────
-    // If in JOINT and heartbeat is lost for >200ms, auto-revert
-    // to CARTESIAN. Lock ordering: mode_heartbeat_mutex_ first, then
-    // traj_mutex_ (never nested the other way) to avoid deadlock.
-    bool mode_hb_timed_out = false;
-    {
-      std::lock_guard<std::mutex> mhb_lock(mode_heartbeat_mutex_);
-      if (mode_heartbeat_received_.load()) {
-        const auto time = get_node()->get_clock()->now();
-        const double mode_hb_diff =
-            (time - last_mode_heartbeat_time_).seconds();
-        if (mode_hb_diff > kModeHeartbeatTimeout) {
-          mode_hb_timed_out = true;
-        }
-      }
-    }
-    if (mode_hb_timed_out) {
-      std::lock_guard<std::mutex> tlock(traj_mutex_);
-      control_mode = ControlMode::CARTESIAN;
-      mode_heartbeat_received_.store(false);
-      RCLCPP_ERROR(get_node()->get_logger(),
-                   "CombinedImpedanceController: Mode heartbeat timeout. "
-                   "Auto-switching to CARTESIAN.");
-      freezeDesiredPoses();
-    }
-
-    // Compute the motion error
-    const ctrl::VectorND motion_error = computeJointMotionError();
-    RCLCPP_INFO_STREAM_THROTTLE(get_node()->get_logger(),
-                                *get_node()->get_clock(), 250,
-                                "Motion error: \n"
-                                    << motion_error.transpose() << "\n");
-
-    // Compute the stiffness and damping in the joint space
-    const ctrl::MatrixND K_d = m_joint_stiffness;
-    const ctrl::MatrixND D_d = m_joint_damping;
-    const ctrl::MatrixND K_i = m_joint_integral_gain;
-
-    // Anti-windup: clamp the integral error to prevent excessive torques
-    m_joint_motion_error_integral
-        << (m_joint_motion_error_integral + 0.1 * motion_error)
-               .cwiseMax(-0.1)
-               .cwiseMin(0.1);
-
-    const ctrl::VectorND stiffness_torque = K_d * motion_error;
-    const ctrl::VectorND damping_torque = D_d * (-q_dot);
-    const ctrl::VectorND integral_torque = K_i * m_joint_motion_error_integral;
-
-    // Compute the task torque
-    tau_task = stiffness_torque + damping_torque;
+    tau_task = computeJointTrajectoryTaskTorque(q_dot);
   } else if (control_mode == ControlMode::CARTESIAN) {
-    // Compute the motion error
-    const ctrl::Vector6D motion_error = computeCartMotionError();
-
-    // Compute the stiffness and damping in the base link
-    const auto base_link_stiffness = Base::displayInBaseLink(
-        m_cartesian_stiffness, Base::m_end_effector_link);
-
-    const ctrl::Matrix6D K_d = base_link_stiffness;
-    // Eigen::VectorXd damping_correction = 3.0 * Eigen::VectorXd::Ones(6);
-    const ctrl::Matrix6D D_d =
-        compute_correct_damping(Lambda, K_d, m_damping_ratio);
-    const ctrl::Matrix6D K_i = m_cartesian_integral_gain;
-
-    // Anti-windup: clamp the integral error to prevent excessive torques
-    m_cart_motion_error_integral.head(3)
-        << (m_cart_motion_error_integral.head(3) + 0.1 * motion_error.head(3))
-               .cwiseMax(-0.1)
-               .cwiseMin(0.1);
-    m_cart_motion_error_integral.tail(3)
-        << (m_cart_motion_error_integral.tail(3) + 0.1 * motion_error.tail(3))
-               .cwiseMax(-0.05)
-               .cwiseMin(0.05);
-
-    const ctrl::Vector6D stiffness_torque =
-        jac.transpose() * (K_d * motion_error);
-    const ctrl::Vector6D damping_torque =
-        jac.transpose() * (D_d * (-jac * q_dot));
-    const ctrl::Vector6D integral_torque =
-        jac.transpose() * (K_i * m_cart_motion_error_integral);
-
-    // Compute the task torque
-    tau_task = stiffness_torque + damping_torque + integral_torque;
+    tau_task = computeCartesianTaskTorque(jac, q_dot, Lambda);
   } else {
     RCLCPP_ERROR(get_node()->get_logger(), "Unknown control mode!");
     throw std::runtime_error("Unknown control mode!");
   }
 
+  // Save the last task torque for blending
+  m_last_tau_task = tau_task;
+
+  // Compute the blending feedforward torque and apply blending if needed
+  const double blend_gain =
+      blend_active_ ? std::exp(-blend_elapsed_ / kBlendTimeConstant) : 0.0;
+  tau = tau + blend_gain * m_blend_tau_ff_;
+
   KDL::JntArray tau_coriolis(Base::m_joint_number),
       tau_gravity(Base::m_joint_number);
-
-  if (m_compensate_gravity) {
-    Base::m_dyn_solver->JntToGravity(Base::m_joint_positions, tau_gravity);
-    tau = tau + tau_gravity.data;
-  }
   if (m_compensate_coriolis) {
     Base::m_dyn_solver->JntToCoriolis(Base::m_joint_positions,
                                       Base::m_joint_velocities, tau_coriolis);
@@ -984,6 +998,9 @@ bool CombinedImpedanceController::modeSwitchCallback(
         RCLCPP_INFO(get_node()->get_logger(), "modeSwitchCallback done.");
         return true;
       }
+      m_blend_tau_ff_ = m_last_tau_task;
+      blend_elapsed_ = 0.0;
+      blend_active_ = true;
       traj_active_ =
           false; // No trajectory yet — just holding current position.
       freezeDesiredPoses();
