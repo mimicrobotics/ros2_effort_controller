@@ -656,6 +656,39 @@ void CombinedImpedanceController::tryRestartExternalProgram() {
   }
 }
 
+void CombinedImpedanceController::publishDebugTopics(
+    const ctrl::VectorND &tau) {
+  // Cartesian-mode debug (target/current/next_goal poses + angle)
+  if (debug_cart_valid_) {
+    const auto stamp = get_node()->now();
+    target_pose_pub_->publish(
+        toPoseStamped(debug_target_frame_, Base::m_robot_base_link, stamp));
+    current_pose_pub_->publish(
+        toPoseStamped(m_current_frame, Base::m_robot_base_link, stamp));
+    next_goal_pose_pub_->publish(
+        toPoseStamped(debug_next_goal_frame_, Base::m_robot_base_link, stamp));
+
+    std_msgs::msg::Float64 angle_msg;
+    angle_msg.data = debug_angle_;
+    angle_pub_->publish(angle_msg);
+
+    debug_cart_valid_ = false;
+  }
+
+  // Tau and control mode (always published in debug mode)
+  if (tau_pub_) {
+    std_msgs::msg::Float64MultiArray tau_msg;
+    tau_msg.data.assign(tau.data(), tau.data() + tau.size());
+    tau_pub_->publish(tau_msg);
+  }
+
+  if (control_mode_pub_) {
+    std_msgs::msg::Int32 mode_msg;
+    mode_msg.data = static_cast<int32_t>(control_mode);
+    control_mode_pub_->publish(mode_msg);
+  }
+}
+
 void CombinedImpedanceController::freezeDesiredPoses() {
   // freeze arm pose with desired pose
   frozen_pose.pose = m_current_frame;
@@ -708,25 +741,12 @@ ctrl::Vector6D CombinedImpedanceController::computeCartMotionError() {
   error.tail<3>() << rot_axis(0), rot_axis(1), rot_axis(2);
 
   if (m_debug_topics) {
-    KDL::Frame next_goal_frame;
-    next_goal_frame.M =
+    debug_target_frame_ = target_frame;
+    debug_next_goal_frame_.M =
         KDL::Rotation::Rot(rot_axis, rot_axis.Norm()) * m_current_frame.M;
-    next_goal_frame.p = error_kdl.p + m_current_frame.p;
-
-    // Publish the target frame, current frame, and next goal frame for
-    // debugging
-    target_pose_pub_->publish(toPoseStamped(
-        target_frame, Base::m_robot_base_link, get_node()->now()));
-
-    current_pose_pub_->publish(toPoseStamped(
-        m_current_frame, Base::m_robot_base_link, get_node()->now()));
-
-    next_goal_pose_pub_->publish(toPoseStamped(
-        next_goal_frame, Base::m_robot_base_link, get_node()->now()));
-
-    std_msgs::msg::Float64 angle_msg;
-    angle_msg.data = angle;
-    angle_pub_->publish(angle_msg);
+    debug_next_goal_frame_.p = error_kdl.p + m_current_frame.p;
+    debug_angle_ = angle;
+    debug_cart_valid_ = true;
   }
 
   return error;
@@ -967,16 +987,8 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
   // Sum up remaining torques
   tau += tau_null + tau_ext;
 
-  if (m_debug_topics && tau_pub_) {
-    std_msgs::msg::Float64MultiArray tau_msg;
-    tau_msg.data.assign(tau.data(), tau.data() + tau.size());
-    tau_pub_->publish(tau_msg);
-  }
-
-  if (m_debug_topics && control_mode_pub_) {
-    std_msgs::msg::Int32 mode_msg;
-    mode_msg.data = static_cast<int32_t>(control_mode);
-    control_mode_pub_->publish(mode_msg);
+  if (m_debug_topics) {
+    publishDebugTopics(tau);
   }
 
   return tau;

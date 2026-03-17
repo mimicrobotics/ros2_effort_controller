@@ -117,6 +117,7 @@ private:
   ctrl::VectorND computeCartesianTaskTorque(const ctrl::MatrixND &jac,
                                             const ctrl::VectorND &q_dot,
                                             const ctrl::Matrix6D &Lambda);
+  void publishDebugTopics(const ctrl::VectorND &tau);
   void freezeDesiredPoses();
   void updateNextTrajectoryPoint(const rclcpp::Duration &period);
 
@@ -144,6 +145,13 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr angle_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr tau_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr control_mode_pub_;
+
+  // Debug state cached by computeCartMotionError for publishDebugTopics
+  KDL::Frame debug_target_frame_;
+  KDL::Frame debug_next_goal_frame_;
+  double debug_angle_{0.0};
+  bool debug_cart_valid_{
+      false}; ///< True when cart debug data was updated this cycle.
 
   // Controller mode service (replaces topic-based mode switching)
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr mode_switch_srv_;
