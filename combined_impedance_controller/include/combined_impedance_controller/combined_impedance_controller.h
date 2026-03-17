@@ -17,8 +17,8 @@
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <std_srvs/srv/set_bool.hpp>
-#include <std_srvs/srv/trigger.hpp>
-#include <ur_dashboard_msgs/srv/load.hpp>
+
+#include "combined_impedance_controller/ur_robot_monitor.h"
 
 #if LOGGING
 #include <matlogger2/matlogger2.h>
@@ -71,8 +71,6 @@ public:
   controller_interface::return_type
   update(const rclcpp::Time &time, const rclcpp::Duration &period) override;
 
-  void updateControllerState();
-
   ctrl::VectorND computeTorque();
 
   using Base = effort_controller_base::EffortControllerBase;
@@ -116,10 +114,10 @@ private:
   ctrl::VectorND computeCartesianTaskTorque(const ctrl::MatrixND &jac,
                                             const ctrl::VectorND &q_dot,
                                             const ctrl::Matrix6D &Lambda);
+  void updateCollisionHeartbeat();
   void publishDebugTopics(const ctrl::VectorND &tau);
   void freezeDesiredPoses();
   void updateNextTrajectoryPoint(const rclcpp::Duration &period);
-  bool isRobotReady() const;
   static ctrl::Vector6D toVector6D(const geometry_msgs::msg::Wrench &w);
 
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr m_heartbeat_subscriber;
@@ -228,61 +226,7 @@ private:
     PROGRAM_RUNNING = 14,
   };
 
-  enum class RobotMode {
-    NO_CONTROLLER = -1,
-    DISCONNECTED = 0,
-    CONFIRM_SAFETY = 1,
-    BOOTING = 2,
-    POWER_OFF = 3,
-    POWER_ON = 4,
-    IDLE = 5,
-    BACKDRIVE = 6,
-    RUNNING = 7,
-    UPDATING_FIRMWARE = 8,
-  };
-
-  enum class SafetyMode {
-    NORMAL = 1u,
-    REDUCED = 2,
-    PROTECTIVE_STOP = 3,
-    RECOVERY = 4,
-    SAFEGUARD_STOP = 5,
-    SYSTEM_EMERGENCY_STOP = 6,
-    ROBOT_EMERGENCY_STOP = 7,
-    VIOLATION = 8,
-    FAULT = 9,
-    VALIDATE_JOINT_ID = 10,
-    UNDEFINED_SAFETY_MODE = 11,
-    AUTOMATIC_MODE_SAFEGUARD_STOP = 12,
-    SYSTEM_THREE_POSITION_ENABLING_STOP = 13,
-  };
-
-  enum class ProgramMode {
-    STOPPED = 0u,
-    PLAYING = 1,
-    PAUSED = 2,
-  };
-
-  enum class MimicRobotMode {
-    UNKNOWN = 0u,
-    IDLE = 1,
-    MOVE = 2,
-    USER_STOPPED = 3,
-  };
-
-  static const char *toString(RobotMode mode);
-  static const char *toString(SafetyMode mode);
-  static const char *toString(ProgramMode mode);
-  void updateRobotState();
-
-  RobotMode robot_mode;
-  SafetyMode safety_mode;
-  ProgramMode program_mode;
-  MimicRobotMode mimic_robot_mode = MimicRobotMode::UNKNOWN;
-
-  enum class ControllerState { RUNNING, WAITING, STOPPED };
-
-  ControllerState controller_state{ControllerState::STOPPED};
+  std::unique_ptr<UrRobotMonitor> ur_monitor_;
   KDL::Frame frozen_pose_;
   std::atomic<bool> is_safe{true}; ///< Safety flag (atomic for thread safety).
   rclcpp::Time
@@ -291,25 +235,6 @@ private:
   std::atomic<bool> initial_heartbeat_received{
       false}; ///< Flag to indicate if the first heartbeat was received (atomic
               ///< for thread safety).
-
-  // External program auto-restart
-  enum class ProgramRestartState {
-    IDLE,             ///< Not attempting restart.
-    LOADING,          ///< load_program service call in flight.
-    WAITING_FOR_PLAY, ///< Load succeeded, about to call play.
-    PLAYING,          ///< play service call in flight.
-  };
-  ProgramRestartState program_restart_state_{ProgramRestartState::IDLE};
-  rclcpp::Client<ur_dashboard_msgs::srv::Load>::SharedPtr load_program_client_;
-  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr play_client_;
-  rclcpp::Time last_program_restart_attempt_;
-  static constexpr double kProgramRestartCooldown{
-      3.0};                     ///< Seconds between retry attempts.
-  std::string ur_program_name_; ///< UR program filename to load (e.g.
-                                ///< "ext_control.urp").
-  std::string
-      dashboard_prefix_; ///< Service namespace prefix for dashboard client.
-  void tryRestartExternalProgram();
 };
 
 } // namespace combined_impedance_controller

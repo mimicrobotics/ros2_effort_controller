@@ -51,9 +51,11 @@ CombinedImpedanceController::on_init() {
   // Define upper limit for impedance forces
   auto_declare<double>("max_impedance_force", 70.0);
 
-  // External program auto-restart parameters
+  // External program auto-restart parameters (declared here for the UR monitor)
   auto_declare<std::string>("ur_program_name", "ext_control.urp");
   auto_declare<std::string>("dashboard_prefix", "/dashboard_client");
+
+  ur_monitor_ = std::make_unique<UrRobotMonitor>(get_node());
 
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::SUCCESS;
@@ -288,15 +290,8 @@ CombinedImpedanceController::on_configure(
         get_node()->get_name() + std::string("/debug_control_mode"), 10);
   }
 
-  // Service clients for automatic external program restart
-  ur_program_name_ = get_node()->get_parameter("ur_program_name").as_string();
-  dashboard_prefix_ = get_node()->get_parameter("dashboard_prefix").as_string();
-  load_program_client_ =
-      get_node()->create_client<ur_dashboard_msgs::srv::Load>(
-          dashboard_prefix_ + "/load_program");
-  play_client_ = get_node()->create_client<std_srvs::srv::Trigger>(
-      dashboard_prefix_ + "/play");
-  last_program_restart_attempt_ = get_node()->get_clock()->now();
+  // Configure UR robot monitor (service clients, parameters)
+  ur_monitor_->configure();
 
   RCLCPP_INFO(get_node()->get_logger(), "Finished Impedance on_configure");
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
@@ -307,9 +302,9 @@ controller_interface::InterfaceConfiguration
 CombinedImpedanceController::state_interface_configuration() const {
   controller_interface::InterfaceConfiguration conf =
       EffortControllerBase::state_interface_configuration();
-  conf.names.emplace_back(tf_prefix + "gpio/robot_mode");
-  conf.names.emplace_back(tf_prefix + "gpio/safety_mode");
-  conf.names.emplace_back(tf_prefix + "gpio/program_running");
+  for (auto &name : ur_monitor_->requiredStateInterfaces(tf_prefix)) {
+    conf.names.emplace_back(std::move(name));
+  }
   return conf;
 }
 
@@ -344,11 +339,8 @@ CombinedImpedanceController::on_activate(
     last_heartbeat_time = get_node()->get_clock()->now();
   }
 
-  // initialize controller state
-  controller_state = ControllerState::RUNNING;
   control_mode =
       ControlMode::CARTESIAN; // default to cartesian mode on activation
-  mimic_robot_mode = MimicRobotMode::MOVE;
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::SUCCESS;
 }
@@ -372,11 +364,25 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
   // Update joint states
   Base::updateJointStates();
 
-  // Update controller state based on heartbeat and collision detection
-  updateControllerState();
+  // Update collision heartbeat and controller state
+  updateCollisionHeartbeat();
+  if (ur_monitor_->updateControllerState(is_safe.load())) {
+    freezeDesiredPoses();
+  }
 
-  // Update current program / safety / arm state from the controller
-  updateRobotState();
+  // Publish mimic robot mode for high level components
+  std_msgs::msg::Int32 mode_msg;
+  mode_msg.data = static_cast<int>(ur_monitor_->mimicRobotMode());
+  m_robot_mode_publisher->publish(mode_msg);
+
+  // Update current program / safety / arm state from the UR driver
+  ur_monitor_->updateState(
+      state_interfaces_[static_cast<uint32_t>(StateInterfaces::ROBOT_MODE)]
+          .get_value(),
+      state_interfaces_[static_cast<uint32_t>(StateInterfaces::SAFETY_MODE)]
+          .get_value(),
+      state_interfaces_[static_cast<uint32_t>(StateInterfaces::PROGRAM_RUNNING)]
+          .get_value());
 
   // Compute the torque to applay at the joints
   ctrl::VectorND tau_tot = computeTorque();
@@ -423,7 +429,8 @@ void CombinedImpedanceController::updateNextTrajectoryPoint(
       get_node()->get_logger(), *get_node()->get_clock(), 2000,
       "Updating trajectory point. Elapsed time: %f seconds", traj_elapsed_);
   std::lock_guard<std::mutex> lock(traj_mutex_);
-  if (!traj_active_ || controller_state != ControllerState::RUNNING) {
+  if (!traj_active_ || ur_monitor_->controllerState() !=
+                           UrRobotMonitor::ControllerState::RUNNING) {
     return;
   }
   traj_elapsed_ += 0.6 * period.seconds();
@@ -460,7 +467,7 @@ void CombinedImpedanceController::updateNextTrajectoryPoint(
   }
 }
 
-void CombinedImpedanceController::updateControllerState() {
+void CombinedImpedanceController::updateCollisionHeartbeat() {
   rclcpp::Time current_last_heartbeat_time;
   bool initial_heartbeat_was_received = false;
   const auto time = get_node()->get_clock()->now();
@@ -484,172 +491,6 @@ void CombinedImpedanceController::updateControllerState() {
       is_safe.store(false); // atomic write
       initial_heartbeat_received.store(false);
     }
-  }
-
-  const bool safe = is_safe.load();
-  const bool ready = safe && isRobotReady();
-
-  if (controller_state == ControllerState::RUNNING && !ready) {
-    controller_state = ControllerState::STOPPED;
-    if (!safe) {
-      RCLCPP_INFO(
-          get_node()->get_logger(),
-          "Collision detected! Freezing current pose. Recycle e-stops and move "
-          "arms into a non collision config to continue operation.");
-    } else if (robot_mode != RobotMode::RUNNING) {
-      RCLCPP_INFO(get_node()->get_logger(), "Robot not running!");
-    } else if (safety_mode != SafetyMode::NORMAL) {
-      RCLCPP_INFO(get_node()->get_logger(), "Safety mode not normal!");
-    } else {
-      RCLCPP_INFO(get_node()->get_logger(), "Program not playing!");
-    }
-  }
-
-  if (!ready) {
-    freezeDesiredPoses();
-    mimic_robot_mode = MimicRobotMode::USER_STOPPED;
-  }
-
-  // If collision had occurred, we now enter a pending state to wait for
-  // recovery to finish.
-  if (safe && controller_state == ControllerState::STOPPED) {
-    controller_state = ControllerState::WAITING;
-  }
-
-  if (controller_state == ControllerState::WAITING && ready) {
-    RCLCPP_INFO(get_node()->get_logger(),
-                "Robot in back in safe remote control state. Resuming...");
-    controller_state = ControllerState::RUNNING;
-    mimic_robot_mode = MimicRobotMode::MOVE;
-  }
-
-  // Try to auto-restart external program if conditions are met
-  tryRestartExternalProgram();
-
-  // Publish mimic robot mode for high level components as well
-  std_msgs::msg::Int32 mode_msg;
-  mode_msg.data = static_cast<int>(mimic_robot_mode);
-  m_robot_mode_publisher->publish(mode_msg);
-}
-
-void CombinedImpedanceController::updateRobotState() {
-  const auto robot_mode_new = static_cast<RobotMode>(
-      state_interfaces_[static_cast<uint32_t>(StateInterfaces::ROBOT_MODE)]
-          .get_value());
-  if (robot_mode_new != robot_mode) {
-    robot_mode = robot_mode_new;
-    RCLCPP_INFO(get_node()->get_logger(), "Robot mode switched to: %s",
-                toString(robot_mode));
-  }
-  const auto safety_mode_new = static_cast<SafetyMode>(
-      state_interfaces_[static_cast<uint32_t>(StateInterfaces::SAFETY_MODE)]
-          .get_value());
-  if (safety_mode_new != safety_mode) {
-    safety_mode = safety_mode_new;
-    RCLCPP_INFO(get_node()->get_logger(), "Safety mode switched to: %s",
-                toString(safety_mode));
-  }
-  const auto program_mode_new = static_cast<ProgramMode>(
-      state_interfaces_[static_cast<uint32_t>(StateInterfaces::PROGRAM_RUNNING)]
-          .get_value());
-  if (program_mode_new != program_mode) {
-    program_mode = program_mode_new;
-    RCLCPP_INFO(get_node()->get_logger(), "Program mode switched to: %s",
-                toString(program_mode));
-  }
-}
-
-void CombinedImpedanceController::tryRestartExternalProgram() {
-  const auto now = get_node()->get_clock()->now();
-
-  // Reset state machine when program is playing again
-  if (program_mode == ProgramMode::PLAYING) {
-    if (program_restart_state_ != ProgramRestartState::IDLE) {
-      RCLCPP_INFO(get_node()->get_logger(),
-                  "External program is playing again.");
-    }
-    program_restart_state_ = ProgramRestartState::IDLE;
-    return;
-  }
-
-  // Only attempt restart when robot is RUNNING, safety is NORMAL, but program
-  // is STOPPED
-  if (robot_mode != RobotMode::RUNNING || safety_mode != SafetyMode::NORMAL ||
-      program_mode != ProgramMode::STOPPED) {
-    return;
-  }
-
-  switch (program_restart_state_) {
-  case ProgramRestartState::IDLE: {
-    // Enforce cooldown between attempts
-    if ((now - last_program_restart_attempt_).seconds() <
-        kProgramRestartCooldown) {
-      return;
-    }
-    if (!load_program_client_->service_is_ready()) {
-      RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(),
-                           5000,
-                           "load_program service not available, waiting...");
-      return;
-    }
-    RCLCPP_INFO(get_node()->get_logger(),
-                "Program stopped while robot is ready. Loading %s...",
-                ur_program_name_.c_str());
-    auto request = std::make_shared<ur_dashboard_msgs::srv::Load::Request>();
-    request->filename = ur_program_name_;
-    load_program_client_->async_send_request(
-        request,
-        [this](
-            rclcpp::Client<ur_dashboard_msgs::srv::Load>::SharedFuture future) {
-          auto result = future.get();
-          if (result->success) {
-            RCLCPP_INFO(get_node()->get_logger(), "%s loaded successfully.",
-                        ur_program_name_.c_str());
-            program_restart_state_ = ProgramRestartState::WAITING_FOR_PLAY;
-          } else {
-            RCLCPP_WARN(get_node()->get_logger(), "Failed to load %s: %s",
-                        ur_program_name_.c_str(), result->answer.c_str());
-            program_restart_state_ = ProgramRestartState::IDLE;
-            last_program_restart_attempt_ = get_node()->get_clock()->now();
-          }
-        });
-    program_restart_state_ = ProgramRestartState::LOADING;
-    last_program_restart_attempt_ = now;
-    break;
-  }
-  case ProgramRestartState::LOADING:
-    // Waiting for load callback to fire
-    break;
-  case ProgramRestartState::WAITING_FOR_PLAY: {
-    if (!play_client_->service_is_ready()) {
-      RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(),
-                           5000, "play service not available, waiting...");
-      return;
-    }
-    RCLCPP_INFO(get_node()->get_logger(), "Playing %s...",
-                ur_program_name_.c_str());
-    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
-    play_client_->async_send_request(
-        request,
-        [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
-          auto result = future.get();
-          if (result->success) {
-            RCLCPP_INFO(get_node()->get_logger(),
-                        "%s play command sent successfully.",
-                        ur_program_name_.c_str());
-          } else {
-            RCLCPP_WARN(get_node()->get_logger(), "Failed to play %s: %s",
-                        ur_program_name_.c_str(), result->message.c_str());
-          }
-          program_restart_state_ = ProgramRestartState::IDLE;
-          last_program_restart_attempt_ = get_node()->get_clock()->now();
-        });
-    program_restart_state_ = ProgramRestartState::PLAYING;
-    break;
-  }
-  case ProgramRestartState::PLAYING:
-    // Waiting for play callback to fire
-    break;
   }
 }
 
@@ -686,12 +527,6 @@ void CombinedImpedanceController::publishDebugTopics(
   }
 }
 
-bool CombinedImpedanceController::isRobotReady() const {
-  return robot_mode == RobotMode::RUNNING &&
-         safety_mode == SafetyMode::NORMAL &&
-         program_mode == ProgramMode::PLAYING;
-}
-
 ctrl::Vector6D
 CombinedImpedanceController::toVector6D(const geometry_msgs::msg::Wrench &w) {
   ctrl::Vector6D v;
@@ -713,7 +548,8 @@ void CombinedImpedanceController::freezeDesiredPoses() {
 ctrl::Vector6D CombinedImpedanceController::computeCartMotionError() {
   // Compute the cartesian error between the current and the target frame
   KDL::Frame target_frame;
-  if (controller_state == ControllerState::RUNNING) {
+  if (ur_monitor_->controllerState() ==
+      UrRobotMonitor::ControllerState::RUNNING) {
     target_frame = m_target_frame;
   } else { // STOPPED or WAITING, use frozen poses
     target_frame = frozen_pose_;
@@ -870,12 +706,8 @@ ctrl::VectorND CombinedImpedanceController::computeCartesianTaskTorque(
 ctrl::VectorND CombinedImpedanceController::computeTorque() {
   RCLCPP_DEBUG_THROTTLE(
       get_node()->get_logger(), *get_node()->get_clock(), 2000,
-      "Compute torque in mode: %s, controller state: %s, robot mode: %s, "
-      "safety mode: %s",
-      control_mode == ControlMode::JOINT_TRAJECTORY ? "JOINT" : "CARTESIAN",
-      controller_state == ControllerState::RUNNING ? "RUNNING" : "STOPPED",
-      robot_mode == RobotMode::RUNNING ? "RUNNING" : "STOPPED",
-      safety_mode == SafetyMode::NORMAL ? "SAFE" : "UNSAFE");
+      "Compute torque in mode: %s",
+      control_mode == ControlMode::JOINT_TRAJECTORY ? "JOINT" : "CARTESIAN");
   // Redefine joints velocities in Eigen format
   ctrl::VectorND q = Base::m_joint_positions.data;
   ctrl::VectorND q_dot = Base::m_joint_velocities.data;
@@ -1025,7 +857,8 @@ void CombinedImpedanceController::ftSensorWrenchCallback(
 
 void CombinedImpedanceController::targetFrameCallback(
     const geometry_msgs::msg::PoseStamped::SharedPtr target) {
-  if (controller_state != ControllerState::RUNNING) {
+  if (ur_monitor_->controllerState() !=
+      UrRobotMonitor::ControllerState::RUNNING) {
     return; // Don't accept new poses while in a non-normal state
   }
   if (control_mode != ControlMode::CARTESIAN) {
@@ -1225,78 +1058,6 @@ void CombinedImpedanceController::modeHeartbeatCallback(
   }
 }
 
-const char *CombinedImpedanceController::toString(RobotMode mode) {
-  switch (mode) {
-  case RobotMode::NO_CONTROLLER:
-    return "NO_CONTROLLER";
-  case RobotMode::DISCONNECTED:
-    return "DISCONNECTED";
-  case RobotMode::CONFIRM_SAFETY:
-    return "CONFIRM_SAFETY";
-  case RobotMode::BOOTING:
-    return "BOOTING";
-  case RobotMode::POWER_OFF:
-    return "POWER_OFF";
-  case RobotMode::POWER_ON:
-    return "POWER_ON";
-  case RobotMode::IDLE:
-    return "IDLE";
-  case RobotMode::BACKDRIVE:
-    return "BACKDRIVE";
-  case RobotMode::RUNNING:
-    return "RUNNING";
-  case RobotMode::UPDATING_FIRMWARE:
-    return "UPDATING_FIRMWARE";
-  default:
-    return "UNKNOWN_ROBOT_MODE";
-  }
-}
-
-const char *CombinedImpedanceController::toString(SafetyMode mode) {
-  switch (mode) {
-  case SafetyMode::NORMAL:
-    return "NORMAL";
-  case SafetyMode::REDUCED:
-    return "REDUCED";
-  case SafetyMode::PROTECTIVE_STOP:
-    return "PROTECTIVE_STOP";
-  case SafetyMode::RECOVERY:
-    return "RECOVERY";
-  case SafetyMode::SAFEGUARD_STOP:
-    return "SAFEGUARD_STOP";
-  case SafetyMode::SYSTEM_EMERGENCY_STOP:
-    return "SYSTEM_EMERGENCY_STOP";
-  case SafetyMode::ROBOT_EMERGENCY_STOP:
-    return "ROBOT_EMERGENCY_STOP";
-  case SafetyMode::VIOLATION:
-    return "VIOLATION";
-  case SafetyMode::FAULT:
-    return "FAULT";
-  case SafetyMode::VALIDATE_JOINT_ID:
-    return "VALIDATE_JOINT_ID";
-  case SafetyMode::UNDEFINED_SAFETY_MODE:
-    return "UNDEFINED_SAFETY_MODE";
-  case SafetyMode::AUTOMATIC_MODE_SAFEGUARD_STOP:
-    return "AUTOMATIC_MODE_SAFEGUARD_STOP";
-  case SafetyMode::SYSTEM_THREE_POSITION_ENABLING_STOP:
-    return "SYSTEM_THREE_POSITION_ENABLING_STOP";
-  default:
-    return "UNKNOWN_SAFETY_MODE";
-  }
-}
-
-const char *CombinedImpedanceController::toString(ProgramMode mode) {
-  switch (mode) {
-  case ProgramMode::STOPPED:
-    return "STOPPED";
-  case ProgramMode::PLAYING:
-    return "PLAYING";
-  case ProgramMode::PAUSED:
-    return "PAUSED";
-  default:
-    return "UNKNOWN_PROGRAM_MODE";
-  }
-}
 } // namespace combined_impedance_controller
 
 // Pluginlib

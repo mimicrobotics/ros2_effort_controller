@@ -66,6 +66,7 @@ ament_export_dependencies(
 #--------------------------------------------------------------------------------
 add_library(${PROJECT_NAME} SHARED
   src/combined_impedance_controller.cpp
+  src/ur_robot_monitor.cpp
 )
 
 target_include_directories(${PROJECT_NAME}

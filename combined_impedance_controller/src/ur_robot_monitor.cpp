@@ -1,0 +1,263 @@
+#include <combined_impedance_controller/ur_robot_monitor.h>
+
+namespace combined_impedance_controller {
+
+UrRobotMonitor::UrRobotMonitor(rclcpp_lifecycle::LifecycleNode::SharedPtr node)
+    : node_(std::move(node)), controller_state_(ControllerState::RUNNING),
+      mimic_robot_mode_(MimicRobotMode::MOVE) {}
+
+void UrRobotMonitor::configure() {
+  ur_program_name_ = node_->get_parameter("ur_program_name").as_string();
+  dashboard_prefix_ = node_->get_parameter("dashboard_prefix").as_string();
+  load_program_client_ = node_->create_client<ur_dashboard_msgs::srv::Load>(
+      dashboard_prefix_ + "/load_program");
+  play_client_ =
+      node_->create_client<std_srvs::srv::Trigger>(dashboard_prefix_ + "/play");
+  last_program_restart_attempt_ = node_->get_clock()->now();
+}
+
+void UrRobotMonitor::updateState(double robot_mode_val, double safety_mode_val,
+                                 double program_running_val) {
+  const auto robot_mode_new = static_cast<RobotMode>(robot_mode_val);
+  if (robot_mode_new != robot_mode_) {
+    robot_mode_ = robot_mode_new;
+    RCLCPP_INFO(node_->get_logger(), "Robot mode switched to: %s",
+                toString(robot_mode_));
+  }
+  const auto safety_mode_new = static_cast<SafetyMode>(safety_mode_val);
+  if (safety_mode_new != safety_mode_) {
+    safety_mode_ = safety_mode_new;
+    RCLCPP_INFO(node_->get_logger(), "Safety mode switched to: %s",
+                toString(safety_mode_));
+  }
+  const auto program_mode_new = static_cast<ProgramMode>(program_running_val);
+  if (program_mode_new != program_mode_) {
+    program_mode_ = program_mode_new;
+    RCLCPP_INFO(node_->get_logger(), "Program mode switched to: %s",
+                toString(program_mode_));
+  }
+}
+
+bool UrRobotMonitor::isReady() const {
+  return robot_mode_ == RobotMode::RUNNING &&
+         safety_mode_ == SafetyMode::NORMAL &&
+         program_mode_ == ProgramMode::PLAYING;
+}
+
+bool UrRobotMonitor::updateControllerState(bool is_safe) {
+  const bool ready = is_safe && isReady();
+
+  if (controller_state_ == ControllerState::RUNNING && !ready) {
+    controller_state_ = ControllerState::STOPPED;
+    if (!is_safe) {
+      RCLCPP_INFO(
+          node_->get_logger(),
+          "Collision detected! Freezing current pose. Recycle e-stops and move "
+          "arms into a non collision config to continue operation.");
+    } else if (robot_mode_ != RobotMode::RUNNING) {
+      RCLCPP_INFO(node_->get_logger(), "Robot not running!");
+    } else if (safety_mode_ != SafetyMode::NORMAL) {
+      RCLCPP_INFO(node_->get_logger(), "Safety mode not normal!");
+    } else {
+      RCLCPP_INFO(node_->get_logger(), "Program not playing!");
+    }
+  }
+
+  if (!ready) {
+    mimic_robot_mode_ = MimicRobotMode::USER_STOPPED;
+  }
+
+  // If collision had occurred, we now enter a pending state to wait for
+  // recovery to finish.
+  if (is_safe && controller_state_ == ControllerState::STOPPED) {
+    controller_state_ = ControllerState::WAITING;
+  }
+
+  if (controller_state_ == ControllerState::WAITING && ready) {
+    RCLCPP_INFO(node_->get_logger(),
+                "Robot in back in safe remote control state. Resuming...");
+    controller_state_ = ControllerState::RUNNING;
+    mimic_robot_mode_ = MimicRobotMode::MOVE;
+  }
+
+  // Try to auto-restart external program if conditions are met
+  tryRestartExternalProgram();
+
+  // Return true when controller should freeze desired poses
+  return !ready;
+}
+
+std::vector<std::string>
+UrRobotMonitor::requiredStateInterfaces(const std::string &tf_prefix) const {
+  return {
+      tf_prefix + "gpio/robot_mode",
+      tf_prefix + "gpio/safety_mode",
+      tf_prefix + "gpio/program_running",
+  };
+}
+
+void UrRobotMonitor::tryRestartExternalProgram() {
+  const auto now = node_->get_clock()->now();
+
+  // Reset state machine when program is playing again
+  if (program_mode_ == ProgramMode::PLAYING) {
+    if (program_restart_state_ != ProgramRestartState::IDLE) {
+      RCLCPP_INFO(node_->get_logger(), "External program is playing again.");
+    }
+    program_restart_state_ = ProgramRestartState::IDLE;
+    return;
+  }
+
+  // Only attempt restart when robot is RUNNING, safety is NORMAL, but program
+  // is STOPPED
+  if (robot_mode_ != RobotMode::RUNNING || safety_mode_ != SafetyMode::NORMAL ||
+      program_mode_ != ProgramMode::STOPPED) {
+    return;
+  }
+
+  switch (program_restart_state_) {
+  case ProgramRestartState::IDLE: {
+    // Enforce cooldown between attempts
+    if ((now - last_program_restart_attempt_).seconds() <
+        kProgramRestartCooldown) {
+      return;
+    }
+    if (!load_program_client_->service_is_ready()) {
+      RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                           "load_program service not available, waiting...");
+      return;
+    }
+    RCLCPP_INFO(node_->get_logger(),
+                "Program stopped while robot is ready. Loading %s...",
+                ur_program_name_.c_str());
+    auto request = std::make_shared<ur_dashboard_msgs::srv::Load::Request>();
+    request->filename = ur_program_name_;
+    load_program_client_->async_send_request(
+        request,
+        [this](
+            rclcpp::Client<ur_dashboard_msgs::srv::Load>::SharedFuture future) {
+          auto result = future.get();
+          if (result->success) {
+            RCLCPP_INFO(node_->get_logger(), "%s loaded successfully.",
+                        ur_program_name_.c_str());
+            program_restart_state_ = ProgramRestartState::WAITING_FOR_PLAY;
+          } else {
+            RCLCPP_WARN(node_->get_logger(), "Failed to load %s: %s",
+                        ur_program_name_.c_str(), result->answer.c_str());
+            program_restart_state_ = ProgramRestartState::IDLE;
+            last_program_restart_attempt_ = node_->get_clock()->now();
+          }
+        });
+    program_restart_state_ = ProgramRestartState::LOADING;
+    last_program_restart_attempt_ = now;
+    break;
+  }
+  case ProgramRestartState::LOADING:
+    // Waiting for load callback to fire
+    break;
+  case ProgramRestartState::WAITING_FOR_PLAY: {
+    if (!play_client_->service_is_ready()) {
+      RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                           "play service not available, waiting...");
+      return;
+    }
+    RCLCPP_INFO(node_->get_logger(), "Playing %s...", ur_program_name_.c_str());
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    play_client_->async_send_request(
+        request,
+        [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+          auto result = future.get();
+          if (result->success) {
+            RCLCPP_INFO(node_->get_logger(),
+                        "%s play command sent successfully.",
+                        ur_program_name_.c_str());
+          } else {
+            RCLCPP_WARN(node_->get_logger(), "Failed to play %s: %s",
+                        ur_program_name_.c_str(), result->message.c_str());
+          }
+          program_restart_state_ = ProgramRestartState::IDLE;
+          last_program_restart_attempt_ = node_->get_clock()->now();
+        });
+    program_restart_state_ = ProgramRestartState::PLAYING;
+    break;
+  }
+  case ProgramRestartState::PLAYING:
+    // Waiting for play callback to fire
+    break;
+  }
+}
+
+const char *UrRobotMonitor::toString(RobotMode mode) {
+  switch (mode) {
+  case RobotMode::NO_CONTROLLER:
+    return "NO_CONTROLLER";
+  case RobotMode::DISCONNECTED:
+    return "DISCONNECTED";
+  case RobotMode::CONFIRM_SAFETY:
+    return "CONFIRM_SAFETY";
+  case RobotMode::BOOTING:
+    return "BOOTING";
+  case RobotMode::POWER_OFF:
+    return "POWER_OFF";
+  case RobotMode::POWER_ON:
+    return "POWER_ON";
+  case RobotMode::IDLE:
+    return "IDLE";
+  case RobotMode::BACKDRIVE:
+    return "BACKDRIVE";
+  case RobotMode::RUNNING:
+    return "RUNNING";
+  case RobotMode::UPDATING_FIRMWARE:
+    return "UPDATING_FIRMWARE";
+  default:
+    return "UNKNOWN_ROBOT_MODE";
+  }
+}
+
+const char *UrRobotMonitor::toString(SafetyMode mode) {
+  switch (mode) {
+  case SafetyMode::NORMAL:
+    return "NORMAL";
+  case SafetyMode::REDUCED:
+    return "REDUCED";
+  case SafetyMode::PROTECTIVE_STOP:
+    return "PROTECTIVE_STOP";
+  case SafetyMode::RECOVERY:
+    return "RECOVERY";
+  case SafetyMode::SAFEGUARD_STOP:
+    return "SAFEGUARD_STOP";
+  case SafetyMode::SYSTEM_EMERGENCY_STOP:
+    return "SYSTEM_EMERGENCY_STOP";
+  case SafetyMode::ROBOT_EMERGENCY_STOP:
+    return "ROBOT_EMERGENCY_STOP";
+  case SafetyMode::VIOLATION:
+    return "VIOLATION";
+  case SafetyMode::FAULT:
+    return "FAULT";
+  case SafetyMode::VALIDATE_JOINT_ID:
+    return "VALIDATE_JOINT_ID";
+  case SafetyMode::UNDEFINED_SAFETY_MODE:
+    return "UNDEFINED_SAFETY_MODE";
+  case SafetyMode::AUTOMATIC_MODE_SAFEGUARD_STOP:
+    return "AUTOMATIC_MODE_SAFEGUARD_STOP";
+  case SafetyMode::SYSTEM_THREE_POSITION_ENABLING_STOP:
+    return "SYSTEM_THREE_POSITION_ENABLING_STOP";
+  default:
+    return "UNKNOWN_SAFETY_MODE";
+  }
+}
+
+const char *UrRobotMonitor::toString(ProgramMode mode) {
+  switch (mode) {
+  case ProgramMode::STOPPED:
+    return "STOPPED";
+  case ProgramMode::PLAYING:
+    return "PLAYING";
+  case ProgramMode::PAUSED:
+    return "PAUSED";
+  default:
+    return "UNKNOWN_PROGRAM_MODE";
+  }
+}
+
+} // namespace combined_impedance_controller
