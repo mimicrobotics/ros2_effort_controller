@@ -21,33 +21,6 @@ public:
     USER_STOPPED = 3,
   };
 
-  explicit UrRobotMonitor(rclcpp_lifecycle::LifecycleNode::SharedPtr node);
-
-  /// Read parameters and create service clients. Call from on_configure().
-  void configure();
-
-  /// Feed raw state_interface values. Call once per update() cycle.
-  void updateState(double robot_mode_val, double safety_mode_val,
-                   double program_running_val);
-
-  /// Run the controller state machine. Call once per update() cycle.
-  /// Returns true when the controller should freeze desired poses.
-  bool updateControllerState(bool is_safe);
-
-  /// True when robot is RUNNING, safety is NORMAL, program is PLAYING.
-  bool isReady() const;
-
-  ControllerState controllerState() const { return controller_state_; }
-  MimicRobotMode mimicRobotMode() const { return mimic_robot_mode_; }
-  RobotMode robotMode() const { return robot_mode_; }
-  SafetyMode safetyMode() const { return safety_mode_; }
-  ProgramMode programMode() const { return program_mode_; }
-
-  /// State interface names the controller must claim.
-  std::vector<std::string>
-  requiredStateInterfaces(const std::string &tf_prefix) const;
-
-private:
   enum class RobotMode {
     NO_CONTROLLER = -1,
     DISCONNECTED = 0,
@@ -87,6 +60,29 @@ private:
   static const char *toString(SafetyMode mode);
   static const char *toString(ProgramMode mode);
 
+  explicit UrRobotMonitor(rclcpp_lifecycle::LifecycleNode::SharedPtr node);
+
+  void configure();
+
+  void updateState(double robot_mode_val, double safety_mode_val,
+                   double program_running_val);
+
+  /// Run the controller state machine. Call once per update() cycle.
+  /// Returns true when the controller should freeze desired poses.
+  bool updateControllerState(bool is_safe);
+
+  bool isReady() const;
+
+  ControllerState controllerState() const { return controller_state_; }
+  MimicRobotMode mimicRobotMode() const { return mimic_robot_mode_; }
+  RobotMode robotMode() const { return robot_mode_; }
+  SafetyMode safetyMode() const { return safety_mode_; }
+  ProgramMode programMode() const { return program_mode_; }
+
+  std::vector<std::string>
+  requiredStateInterfaces(const std::string &tf_prefix) const;
+
+private:
   rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
 
   RobotMode robot_mode_{RobotMode::DISCONNECTED};
@@ -97,6 +93,34 @@ private:
   ControllerState controller_state_{ControllerState::STOPPED};
   MimicRobotMode mimic_robot_mode_{MimicRobotMode::UNKNOWN};
   void tryRestartExternalProgram();
+  void tryRecoverFromStop();
+
+  // Async Trigger helper: fires an async call and transitions recovery_state_
+  // to next_state on success, or resets to IDLE on failure.
+  using TriggerClient = rclcpp::Client<std_srvs::srv::Trigger>;
+  void asyncTrigger(TriggerClient::SharedPtr &client, const char *description);
+
+  // Stop recovery state machine
+  enum class RecoveryState {
+    IDLE,
+    CLOSING_POPUP,
+    UNLOCKING_PROTECTIVE_STOP,
+    RESTARTING_SAFETY,
+    POWERING_ON,
+    RELEASING_BRAKES,
+  };
+  RecoveryState recovery_state_{RecoveryState::IDLE};
+  RecoveryState recovery_next_state_{RecoveryState::IDLE};
+  SafetyMode recovery_trigger_mode_{SafetyMode::NORMAL};
+  bool recovery_call_in_flight_{false};
+  rclcpp::Time last_recovery_attempt_;
+  static constexpr double kRecoveryCooldown{3.0};
+
+  TriggerClient::SharedPtr close_safety_popup_client_;
+  TriggerClient::SharedPtr unlock_protective_stop_client_;
+  TriggerClient::SharedPtr restart_safety_client_;
+  TriggerClient::SharedPtr power_on_client_;
+  TriggerClient::SharedPtr brake_release_client_;
 
   // External program auto-restart
   enum class ProgramRestartState {
@@ -107,7 +131,7 @@ private:
   };
   ProgramRestartState program_restart_state_{ProgramRestartState::IDLE};
   rclcpp::Client<ur_dashboard_msgs::srv::Load>::SharedPtr load_program_client_;
-  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr play_client_;
+  TriggerClient::SharedPtr play_client_;
   rclcpp::Time last_program_restart_attempt_;
   static constexpr double kProgramRestartCooldown{3.0};
   std::string ur_program_name_;

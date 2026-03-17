@@ -14,6 +14,19 @@ void UrRobotMonitor::configure() {
   play_client_ =
       node_->create_client<std_srvs::srv::Trigger>(dashboard_prefix_ + "/play");
   last_program_restart_attempt_ = node_->get_clock()->now();
+  last_recovery_attempt_ = node_->get_clock()->now();
+
+  // Recovery service clients
+  close_safety_popup_client_ = node_->create_client<std_srvs::srv::Trigger>(
+      dashboard_prefix_ + "/close_safety_popup");
+  unlock_protective_stop_client_ = node_->create_client<std_srvs::srv::Trigger>(
+      dashboard_prefix_ + "/unlock_protective_stop");
+  restart_safety_client_ = node_->create_client<std_srvs::srv::Trigger>(
+      dashboard_prefix_ + "/restart_safety");
+  power_on_client_ = node_->create_client<std_srvs::srv::Trigger>(
+      dashboard_prefix_ + "/power_on");
+  brake_release_client_ = node_->create_client<std_srvs::srv::Trigger>(
+      dashboard_prefix_ + "/brake_release");
 }
 
 void UrRobotMonitor::updateState(double robot_mode_val, double safety_mode_val,
@@ -80,6 +93,9 @@ bool UrRobotMonitor::updateControllerState(bool is_safe) {
     mimic_robot_mode_ = MimicRobotMode::MOVE;
   }
 
+  // Try to recover from safety stops / faults
+  tryRecoverFromStop();
+
   // Try to auto-restart external program if conditions are met
   tryRestartExternalProgram();
 
@@ -94,6 +110,120 @@ UrRobotMonitor::requiredStateInterfaces(const std::string &tf_prefix) const {
       tf_prefix + "gpio/safety_mode",
       tf_prefix + "gpio/program_running",
   };
+}
+
+void UrRobotMonitor::asyncTrigger(TriggerClient::SharedPtr &client,
+                                  const char *description) {
+  if (!client->service_is_ready()) {
+    RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                         "%s service not available, waiting...", description);
+    return;
+  }
+  RCLCPP_INFO(node_->get_logger(), "Recovery: calling %s...", description);
+  recovery_call_in_flight_ = true;
+  auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+  client->async_send_request(request, [this, description](
+                                          TriggerClient::SharedFuture future) {
+    auto result = future.get();
+    recovery_call_in_flight_ = false;
+    if (result->success) {
+      RCLCPP_INFO(node_->get_logger(), "Recovery: %s succeeded.", description);
+      recovery_state_ = recovery_next_state_;
+    } else {
+      RCLCPP_WARN(node_->get_logger(), "Recovery: %s failed: %s", description,
+                  result->message.c_str());
+      recovery_state_ = RecoveryState::IDLE;
+      last_recovery_attempt_ = node_->get_clock()->now();
+    }
+  });
+}
+
+void UrRobotMonitor::tryRecoverFromStop() {
+  // Nothing to do when safety is normal
+  if (safety_mode_ == SafetyMode::NORMAL) {
+    if (recovery_state_ != RecoveryState::IDLE) {
+      RCLCPP_INFO(node_->get_logger(), "Recovery: safety mode is normal.");
+      recovery_state_ = RecoveryState::IDLE;
+    }
+    return;
+  }
+
+  // Don't start a new recovery during transient states (RECOVERY, BOOTING)
+  if (safety_mode_ == SafetyMode::RECOVERY) {
+    return;
+  }
+
+  // Wait for in-flight service calls to complete
+  if (recovery_call_in_flight_) {
+    return;
+  }
+
+  const auto now = node_->get_clock()->now();
+
+  // Determine which recovery sequence to run based on the triggering safety
+  // mode. Only start a new sequence from IDLE.
+  if (recovery_state_ == RecoveryState::IDLE) {
+    if ((now - last_recovery_attempt_).seconds() < kRecoveryCooldown) {
+      return;
+    }
+    recovery_trigger_mode_ = safety_mode_;
+    RCLCPP_INFO(node_->get_logger(), "Recovery: starting recovery from %s...",
+                toString(safety_mode_));
+    recovery_state_ = RecoveryState::CLOSING_POPUP;
+  }
+
+  switch (recovery_state_) {
+  case RecoveryState::IDLE:
+    break;
+
+  case RecoveryState::CLOSING_POPUP:
+    // All recovery paths start with close_safety_popup.
+    // Determine what comes after based on the trigger mode.
+    switch (recovery_trigger_mode_) {
+    case SafetyMode::PROTECTIVE_STOP:
+      recovery_next_state_ = RecoveryState::UNLOCKING_PROTECTIVE_STOP;
+      break;
+    case SafetyMode::ROBOT_EMERGENCY_STOP:
+    case SafetyMode::SYSTEM_EMERGENCY_STOP:
+    case SafetyMode::SAFEGUARD_STOP:
+    case SafetyMode::AUTOMATIC_MODE_SAFEGUARD_STOP:
+      recovery_next_state_ = RecoveryState::RELEASING_BRAKES;
+      break;
+    case SafetyMode::FAULT:
+    case SafetyMode::VIOLATION:
+      recovery_next_state_ = RecoveryState::RESTARTING_SAFETY;
+      break;
+    default:
+      RCLCPP_WARN(node_->get_logger(),
+                  "Recovery: no recovery procedure for %s.",
+                  toString(recovery_trigger_mode_));
+      recovery_state_ = RecoveryState::IDLE;
+      last_recovery_attempt_ = now;
+      return;
+    }
+    asyncTrigger(close_safety_popup_client_, "close_safety_popup");
+    break;
+
+  case RecoveryState::UNLOCKING_PROTECTIVE_STOP:
+    recovery_next_state_ = RecoveryState::IDLE;
+    asyncTrigger(unlock_protective_stop_client_, "unlock_protective_stop");
+    break;
+
+  case RecoveryState::RESTARTING_SAFETY:
+    recovery_next_state_ = RecoveryState::POWERING_ON;
+    asyncTrigger(restart_safety_client_, "restart_safety");
+    break;
+
+  case RecoveryState::POWERING_ON:
+    recovery_next_state_ = RecoveryState::RELEASING_BRAKES;
+    asyncTrigger(power_on_client_, "power_on");
+    break;
+
+  case RecoveryState::RELEASING_BRAKES:
+    recovery_next_state_ = RecoveryState::IDLE;
+    asyncTrigger(brake_release_client_, "brake_release");
+    break;
+  }
 }
 
 void UrRobotMonitor::tryRestartExternalProgram() {
