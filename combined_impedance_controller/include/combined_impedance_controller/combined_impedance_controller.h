@@ -1,5 +1,5 @@
-#ifndef EFFORT_IMPEDANCE_CONTROLLER_H_INCLUDED
-#define EFFORT_IMPEDANCE_CONTROLLER_H_INCLUDED
+#ifndef COMBINED_IMPEDANCE_CONTROLLER_H_INCLUDED
+#define COMBINED_IMPEDANCE_CONTROLLER_H_INCLUDED
 
 #include <mutex>
 
@@ -20,7 +20,6 @@
 #include <std_srvs/srv/trigger.hpp>
 #include <ur_dashboard_msgs/srv/load.hpp>
 
-#define DEBUG 0
 #if LOGGING
 #include <matlogger2/matlogger2.h>
 #endif
@@ -120,6 +119,8 @@ private:
   void publishDebugTopics(const ctrl::VectorND &tau);
   void freezeDesiredPoses();
   void updateNextTrajectoryPoint(const rclcpp::Duration &period);
+  bool isRobotReady() const;
+  static ctrl::Vector6D toVector6D(const geometry_msgs::msg::Wrench &w);
 
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr m_heartbeat_subscriber;
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr
@@ -182,7 +183,6 @@ private:
   // = Member variables for cartesian impedance control =
   // ====================================================
   KDL::Frame m_target_frame;
-  KDL::JntArray m_null_space;
   KDL::Frame m_current_frame;
   ctrl::VectorND m_q_ns; // Null space configuration
   ctrl::Vector6D m_cart_motion_error_integral;
@@ -280,13 +280,10 @@ private:
   ProgramMode program_mode;
   MimicRobotMode mimic_robot_mode = MimicRobotMode::UNKNOWN;
 
-  enum ControllerState { RUNNING, WAITING, STOPPED };
+  enum class ControllerState { RUNNING, WAITING, STOPPED };
 
   ControllerState controller_state{ControllerState::STOPPED};
-  struct FrozenPose {
-    KDL::Frame pose;
-  };
-  FrozenPose frozen_pose;
+  KDL::Frame frozen_pose_;
   std::atomic<bool> is_safe{true}; ///< Safety flag (atomic for thread safety).
   rclcpp::Time
       last_heartbeat_time;    ///< Timestamp of the last received heartbeat.

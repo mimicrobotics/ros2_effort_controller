@@ -485,41 +485,38 @@ void CombinedImpedanceController::updateControllerState() {
       initial_heartbeat_received.store(false);
     }
   }
-  if (controller_state == ControllerState::RUNNING) {
-    if (!is_safe.load()) {
-      controller_state = ControllerState::STOPPED;
+
+  const bool safe = is_safe.load();
+  const bool ready = safe && isRobotReady();
+
+  if (controller_state == ControllerState::RUNNING && !ready) {
+    controller_state = ControllerState::STOPPED;
+    if (!safe) {
       RCLCPP_INFO(
           get_node()->get_logger(),
           "Collision detected! Freezing current pose. Recycle e-stops and move "
           "arms into a non collision config to continue operation.");
     } else if (robot_mode != RobotMode::RUNNING) {
-      controller_state = ControllerState::STOPPED;
       RCLCPP_INFO(get_node()->get_logger(), "Robot not running!");
     } else if (safety_mode != SafetyMode::NORMAL) {
-      controller_state = ControllerState::STOPPED;
       RCLCPP_INFO(get_node()->get_logger(), "Safety mode not normal!");
-    } else if (program_mode != ProgramMode::PLAYING) {
-      controller_state = ControllerState::STOPPED;
+    } else {
       RCLCPP_INFO(get_node()->get_logger(), "Program not playing!");
     }
   }
 
-  if (!is_safe.load() || robot_mode != RobotMode::RUNNING ||
-      safety_mode != SafetyMode::NORMAL ||
-      program_mode != ProgramMode::PLAYING) {
+  if (!ready) {
     freezeDesiredPoses();
     mimic_robot_mode = MimicRobotMode::USER_STOPPED;
   }
 
-  // if  collision had occurred, we now enter a pending state to wait for
+  // If collision had occurred, we now enter a pending state to wait for
   // recovery to finish.
-  if (is_safe.load() && controller_state == ControllerState::STOPPED) {
+  if (safe && controller_state == ControllerState::STOPPED) {
     controller_state = ControllerState::WAITING;
   }
 
-  if (controller_state == ControllerState::WAITING && is_safe.load() &&
-      robot_mode == RobotMode::RUNNING && safety_mode == SafetyMode::NORMAL &&
-      program_mode == ProgramMode::PLAYING) {
+  if (controller_state == ControllerState::WAITING && ready) {
     RCLCPP_INFO(get_node()->get_logger(),
                 "Robot in back in safe remote control state. Resuming...");
     controller_state = ControllerState::RUNNING;
@@ -689,9 +686,22 @@ void CombinedImpedanceController::publishDebugTopics(
   }
 }
 
+bool CombinedImpedanceController::isRobotReady() const {
+  return robot_mode == RobotMode::RUNNING &&
+         safety_mode == SafetyMode::NORMAL &&
+         program_mode == ProgramMode::PLAYING;
+}
+
+ctrl::Vector6D
+CombinedImpedanceController::toVector6D(const geometry_msgs::msg::Wrench &w) {
+  ctrl::Vector6D v;
+  v << w.force.x, w.force.y, w.force.z, w.torque.x, w.torque.y, w.torque.z;
+  return v;
+}
+
 void CombinedImpedanceController::freezeDesiredPoses() {
   // freeze arm pose with desired pose
-  frozen_pose.pose = m_current_frame;
+  frozen_pose_ = m_current_frame;
   m_target_frame = m_current_frame;
   m_cart_motion_error_integral = ctrl::Vector6D::Zero();
   m_desired_joint_positions_ = Base::m_joint_positions.data;
@@ -706,7 +716,7 @@ ctrl::Vector6D CombinedImpedanceController::computeCartMotionError() {
   if (controller_state == ControllerState::RUNNING) {
     target_frame = m_target_frame;
   } else { // STOPPED or WAITING, use frozen poses
-    target_frame = frozen_pose.pose;
+    target_frame = frozen_pose_;
   }
 
   // Transformation from target -> current corresponds to error = target -
@@ -817,7 +827,7 @@ ctrl::VectorND CombinedImpedanceController::computeJointTrajectoryTaskTorque(
   const ctrl::VectorND integral_torque = K_i * m_joint_motion_error_integral;
 
   // Compute the task torque
-  return stiffness_torque + damping_torque;
+  return stiffness_torque + damping_torque + integral_torque;
 }
 
 ctrl::VectorND CombinedImpedanceController::computeCartesianTaskTorque(
@@ -869,22 +879,15 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
   // Redefine joints velocities in Eigen format
   ctrl::VectorND q = Base::m_joint_positions.data;
   ctrl::VectorND q_dot = Base::m_joint_velocities.data;
-  ctrl::VectorND q_null_space(Base::m_joint_number);
 
   // Compute the forward kinematics
   Base::m_fk_solver->JntToCart(Base::m_joint_positions, m_current_frame);
-
-  debug_msg::msg::Debug debug_msg;
 
   // Compute the jacobian
   Base::m_jnt_to_jac_solver->JntToJac(Base::m_joint_positions,
                                       Base::m_jacobian);
 
-  // Compute the pseudo-inverse of the jacobian
   ctrl::MatrixND jac = Base::m_jacobian.data;
-  ctrl::MatrixND jac_tran_pseudo_inverse;
-
-  pseudoInverse(jac.transpose(), &jac_tran_pseudo_inverse);
 
   KDL::JntSpaceInertiaMatrix M(Base::m_joint_number);
   m_dyn_solver->JntToMass(Base::m_joint_positions, M);
@@ -930,16 +933,13 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
       throw std::runtime_error("Unknown control mode!");
     }
   }
-  KDL::JntArray tau_coriolis(Base::m_joint_number),
-      tau_gravity(Base::m_joint_number);
+  KDL::JntArray tau_coriolis(Base::m_joint_number);
   if (m_compensate_coriolis) {
     Base::m_dyn_solver->JntToCoriolis(Base::m_joint_positions,
                                       Base::m_joint_velocities, tau_coriolis);
     tau += tau_coriolis.data;
   }
   // Computes the Jacobian derivative * q_dot, negligible for most of the robot
-  Eigen::VectorXd j_tran_lambda_jdot_qdot =
-      Eigen::VectorXd::Zero(Base::m_joint_number);
   if (m_compensate_dJdq) {
     KDL::JntArrayVel q_in(Base::m_joint_positions, Base::m_joint_velocities);
     KDL::Twist jac_dot_q_dot;
@@ -950,9 +950,7 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
         jac_dot_q_dot.vel.z();
     jac_dot_q_dot_eigen.tail(3) << jac_dot_q_dot.rot.x(), jac_dot_q_dot.rot.y(),
         jac_dot_q_dot.rot.z();
-    Eigen::VectorXd j_tran_lambda_jdot_qdot =
-        jac.transpose() * Lambda * jac_dot_q_dot_eigen;
-    tau = tau + j_tran_lambda_jdot_qdot;
+    tau += jac.transpose() * Lambda * jac_dot_q_dot_eigen;
   }
 
   // Compute the null space torque
@@ -997,17 +995,9 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
 
 void CombinedImpedanceController::targetWrenchCallback(
     const geometry_msgs::msg::WrenchStamped::SharedPtr wrench) {
-  // Parse the target wrench
-  m_target_wrench[0] = wrench->wrench.force.x;
-  m_target_wrench[1] = wrench->wrench.force.y;
-  m_target_wrench[2] = wrench->wrench.force.z;
-  m_target_wrench[3] = wrench->wrench.torque.x;
-  m_target_wrench[4] = wrench->wrench.torque.y;
-  m_target_wrench[5] = wrench->wrench.torque.z;
+  m_target_wrench = toVector6D(wrench->wrench);
 
-  // Check if the wrench is given in the base frame
   if (wrench->header.frame_id != Base::m_robot_base_link) {
-    // Transform the wrench to the base frame
     m_target_wrench =
         Base::displayInBaseLink(m_target_wrench, wrench->header.frame_id);
   }
@@ -1016,29 +1006,18 @@ void CombinedImpedanceController::targetWrenchCallback(
 void CombinedImpedanceController::ftSensorWrenchCallback(
     const geometry_msgs::msg::WrenchStamped::SharedPtr wrench) {
 
-  if (std::isnan(wrench->wrench.force.x) ||
-      std::isnan(wrench->wrench.force.y) ||
-      std::isnan(wrench->wrench.force.z) ||
-      std::isnan(wrench->wrench.torque.x) ||
-      std::isnan(wrench->wrench.torque.y) ||
-      std::isnan(wrench->wrench.torque.z)) {
-    auto &clock = *get_node()->get_clock();
+  const auto v = toVector6D(wrench->wrench);
+
+  if (v.hasNaN()) {
     RCLCPP_WARN_STREAM_THROTTLE(
-        get_node()->get_logger(), clock, 3000,
+        get_node()->get_logger(), *get_node()->get_clock(), 3000,
         "NaN detected in force-torque sensor wrench. Ignoring input.");
     return;
   }
 
-  m_ft_sensor_wrench[0] = wrench->wrench.force.x;
-  m_ft_sensor_wrench[1] = wrench->wrench.force.y;
-  m_ft_sensor_wrench[2] = wrench->wrench.force.z;
-  m_ft_sensor_wrench[3] = wrench->wrench.torque.x;
-  m_ft_sensor_wrench[4] = wrench->wrench.torque.y;
-  m_ft_sensor_wrench[5] = wrench->wrench.torque.z;
+  m_ft_sensor_wrench = v;
 
-  // Check if the wrench is given in the base frame
   if (wrench->header.frame_id != Base::m_robot_base_link) {
-    // Transform the wrench to the base frame
     m_ft_sensor_wrench =
         Base::displayInBaseLink(m_ft_sensor_wrench, wrench->header.frame_id);
   }
