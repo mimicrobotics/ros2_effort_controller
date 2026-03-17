@@ -96,7 +96,6 @@ public:
   // ===========================
   // = Common config variables =
   // ===========================
-  double m_max_impendance_force;
   ctrl::Vector6D m_target_wrench;
   std::string tf_prefix;
 

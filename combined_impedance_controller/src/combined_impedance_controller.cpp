@@ -153,8 +153,6 @@ CombinedImpedanceController::on_configure(
       get_node()->get_logger(),
       "Joint integral gain: " << m_joint_integral_gain.transpose());
 
-  m_max_impendance_force =
-      get_node()->get_parameter("max_impedance_force").as_double(); // TODO
   // Set nullspace stiffness
   m_null_space_stiffness =
       get_node()->get_parameter("nullspace_stiffness").as_double();
@@ -465,7 +463,7 @@ void CombinedImpedanceController::updateControllerState() {
     double time_diff = (time - current_last_heartbeat_time).seconds();
     if (time_diff > 0.5 && is_safe.load()) {
       RCLCPP_INFO_THROTTLE(
-          get_node()->get_logger(), *get_node()->get_clock(), 1.0,
+          get_node()->get_logger(), *get_node()->get_clock(), 1000,
           "Heartbeat timed out. Setting controller to UNSAFE. Current time: "
           "%f, Last heartbeat: %f",
           time.seconds(), current_last_heartbeat_time.seconds());
@@ -769,37 +767,41 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
   tau_ext.setZero();
   tau_null.setZero();
 
-  if (control_mode == ControlMode::JOINT_TRAJECTORY) {
-    const auto tau_joint = computeJointTrajectoryTaskTorque(q_dot);
-    tau += tau_joint;
+  {
+    std::lock_guard<std::mutex> lock(traj_mutex_);
+    if (control_mode == ControlMode::JOINT_TRAJECTORY) {
+      const auto tau_joint = computeJointTrajectoryTaskTorque(q_dot);
+      tau += tau_joint;
 
-    // Apply optional blending
-    if (blend_active_) {
-      // Compute the blending feedforward torque and apply blending if needed
-      const double blend_gain = std::exp(-blend_elapsed_ / kBlendTimeConstant);
-      tau += blend_gain * (m_blend_tau_ff_ - tau_joint);
+      // Apply optional blending
+      if (blend_active_) {
+        // Compute the blending feedforward torque and apply blending if needed
+        const double blend_gain =
+            std::exp(-blend_elapsed_ / kBlendTimeConstant);
+        tau += blend_gain * (m_blend_tau_ff_ - tau_joint);
 
-      RCLCPP_INFO_STREAM(get_node()->get_logger(),
-                         << "Tau: " << tau.transpose() << "\n"
-                         << "tau_joint: " << tau_joint.transpose() << "\n");
+        RCLCPP_INFO_STREAM(get_node()->get_logger(),
+                           << "Tau: " << tau.transpose() << "\n"
+                           << "tau_joint: " << tau_joint.transpose() << "\n");
 
-      // Advance blend timer after arm has been updated.
-      blend_elapsed_ += 0.001;                         // 1 kHz control loop
-      if (blend_elapsed_ > 5.0 * kBlendTimeConstant) { // ~250 ms — gain < 0.7%
-        blend_active_ = false;
-        RCLCPP_INFO(get_node()->get_logger(), "Torque blend complete.");
+        // Advance blend timer after arm has been updated.
+        blend_elapsed_ += 0.001; // 1 kHz control loop
+        if (blend_elapsed_ >
+            5.0 * kBlendTimeConstant) { // ~250 ms — gain < 0.7%
+          blend_active_ = false;
+          RCLCPP_INFO(get_node()->get_logger(), "Torque blend complete.");
+        }
       }
+    } else if (control_mode == ControlMode::CARTESIAN) {
+      const auto tau_task = computeCartesianTaskTorque(jac, q_dot, Lambda);
+      // Save the last task torque for blending
+      m_last_tau_task = tau_task;
+      tau += tau_task;
+    } else {
+      RCLCPP_ERROR(get_node()->get_logger(), "Unknown control mode!");
+      throw std::runtime_error("Unknown control mode!");
     }
-  } else if (control_mode == ControlMode::CARTESIAN) {
-    const auto tau_task = computeCartesianTaskTorque(jac, q_dot, Lambda);
-    // Save the last task torque for blending
-    m_last_tau_task = tau_task;
-    tau += tau_task;
-  } else {
-    RCLCPP_ERROR(get_node()->get_logger(), "Unknown control mode!");
-    throw std::runtime_error("Unknown control mode!");
   }
-
   KDL::JntArray tau_coriolis(Base::m_joint_number),
       tau_gravity(Base::m_joint_number);
   if (m_compensate_coriolis) {
@@ -834,40 +836,6 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
   } else {
     tau_null = ctrl::VectorND::Zero(Base::m_joint_number);
   }
-
-#if DEBUG
-  Eigen::VectorXd Force = K_d * motion_error - D_d * (jac * q_dot);
-  for (int i = 0; i < 7; i++) {
-    debug_msg.stiffness_torque[i] = stiffness_torque(i);
-    debug_msg.damping_torque[i] = damping_torque(i);
-    debug_msg.coriolis_torque[i] = tau_coriolis(i);
-    debug_msg.nullspace_torque[i] = tau_null(i);
-    if (i < 6) {
-      debug_msg.impedance_force[i] = Force(i);
-    }
-  }
-  m_data_publisher->publish(debug_msg);
-#endif
-#if LOGGING
-  Eigen::VectorXd Force = K_d * motion_error - D_d * (jac * q_dot);
-  // lambda that computes condition number
-  auto compute_condition_number = [](const Eigen::MatrixXd &matrix) {
-    Eigen::JacobiSVD<Eigen::MatrixXd> svd(matrix);
-    Eigen::VectorXd singular_values = svd.singularValues();
-    return singular_values(0) / singular_values(singular_values.size() - 1);
-  };
-  m_logger->add("condition_number mass", compute_condition_number(M.data));
-  m_logger->add("condition_number jac", compute_condition_number(jac));
-  for (int i = 0; i < 7; i++) {
-    m_logger->add("stiffness_" + std::to_string(i), stiffness_torque(i));
-    m_logger->add("damping_" + std::to_string(i), damping_torque(i));
-    m_logger->add("coriolis_" + std::to_string(i), tau_coriolis(i));
-    m_logger->add("nullspace_" + std::to_string(i), tau_null(i));
-    if (i < 6) {
-      m_logger->add("impedance_force_" + std::to_string(i), Force(i));
-    }
-  }
-#endif
 
   double k_p = 1.0;
   // Compute the torque to achieve the desired force

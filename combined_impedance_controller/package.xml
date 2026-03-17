@@ -14,10 +14,8 @@
   <depend>rclcpp</depend>
   <depend>effort_controller_base</depend>
   <depend>controller_interface</depend>
-  <depend>debug_msg</depend>
-  <depend>std_msg</depend>
+  <depend>std_msgs</depend>
   <depend>std_srvs</depend>
-  <depend>sensor_msg</depend>
 
   <export>
     <build_type>ament_cmake</build_type>
