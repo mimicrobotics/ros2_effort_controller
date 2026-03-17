@@ -3,10 +3,9 @@
 namespace combined_impedance_controller {
 
 UrRobotMonitor::UrRobotMonitor(rclcpp_lifecycle::LifecycleNode::SharedPtr node)
-    : node_(std::move(node)), controller_state_(ControllerState::RUNNING),
-      mimic_robot_mode_(MimicRobotMode::MOVE) {}
+    : RobotMonitor(std::move(node)) {}
 
-void UrRobotMonitor::configure() {
+void UrRobotMonitor::onConfigure() {
   ur_program_name_ = node_->get_parameter("ur_program_name").as_string();
   dashboard_prefix_ = node_->get_parameter("dashboard_prefix").as_string();
   load_program_client_ = node_->create_client<ur_dashboard_msgs::srv::Load>(
@@ -29,21 +28,22 @@ void UrRobotMonitor::configure() {
       dashboard_prefix_ + "/brake_release");
 }
 
-void UrRobotMonitor::updateState(double robot_mode_val, double safety_mode_val,
-                                 double program_running_val) {
-  const auto robot_mode_new = static_cast<RobotMode>(robot_mode_val);
+void UrRobotMonitor::updateState(const std::vector<double> &state_values) {
+  // Indices correspond to requiredStateInterfaces() order:
+  //   [0] robot_mode, [1] safety_mode, [2] program_running
+  const auto robot_mode_new = static_cast<RobotMode>(state_values[0]);
   if (robot_mode_new != robot_mode_) {
     robot_mode_ = robot_mode_new;
     RCLCPP_INFO(node_->get_logger(), "Robot mode switched to: %s",
                 toString(robot_mode_));
   }
-  const auto safety_mode_new = static_cast<SafetyMode>(safety_mode_val);
+  const auto safety_mode_new = static_cast<SafetyMode>(state_values[1]);
   if (safety_mode_new != safety_mode_) {
     safety_mode_ = safety_mode_new;
     RCLCPP_INFO(node_->get_logger(), "Safety mode switched to: %s",
                 toString(safety_mode_));
   }
-  const auto program_mode_new = static_cast<ProgramMode>(program_running_val);
+  const auto program_mode_new = static_cast<ProgramMode>(state_values[2]);
   if (program_mode_new != program_mode_) {
     program_mode_ = program_mode_new;
     RCLCPP_INFO(node_->get_logger(), "Program mode switched to: %s",
@@ -57,50 +57,9 @@ bool UrRobotMonitor::isReady() const {
          program_mode_ == ProgramMode::PLAYING;
 }
 
-bool UrRobotMonitor::updateControllerState(bool is_safe) {
-  const bool ready = is_safe && isReady();
-
-  if (controller_state_ == ControllerState::RUNNING && !ready) {
-    controller_state_ = ControllerState::STOPPED;
-    if (!is_safe) {
-      RCLCPP_INFO(
-          node_->get_logger(),
-          "Collision detected! Freezing current pose. Recycle e-stops and move "
-          "arms into a non collision config to continue operation.");
-    } else if (robot_mode_ != RobotMode::RUNNING) {
-      RCLCPP_INFO(node_->get_logger(), "Robot not running!");
-    } else if (safety_mode_ != SafetyMode::NORMAL) {
-      RCLCPP_INFO(node_->get_logger(), "Safety mode not normal!");
-    } else {
-      RCLCPP_INFO(node_->get_logger(), "Program not playing!");
-    }
-  }
-
-  if (!ready) {
-    mimic_robot_mode_ = MimicRobotMode::USER_STOPPED;
-  }
-
-  // If collision had occurred, we now enter a pending state to wait for
-  // recovery to finish.
-  if (is_safe && controller_state_ == ControllerState::STOPPED) {
-    controller_state_ = ControllerState::WAITING;
-  }
-
-  if (controller_state_ == ControllerState::WAITING && ready) {
-    RCLCPP_INFO(node_->get_logger(),
-                "Robot in back in safe remote control state. Resuming...");
-    controller_state_ = ControllerState::RUNNING;
-    mimic_robot_mode_ = MimicRobotMode::MOVE;
-  }
-
-  // Try to recover from safety stops / faults
+void UrRobotMonitor::onRecoveryTick() {
   tryRecoverFromStop();
-
-  // Try to auto-restart external program if conditions are met
   tryRestartExternalProgram();
-
-  // Return true when controller should freeze desired poses
-  return !ready;
 }
 
 std::vector<std::string>

@@ -1,4 +1,5 @@
 #include <combined_impedance_controller/combined_impedance_controller.h>
+#include <combined_impedance_controller/ur_robot_monitor.h>
 #include <exception>
 
 namespace combined_impedance_controller {
@@ -55,7 +56,7 @@ CombinedImpedanceController::on_init() {
   auto_declare<std::string>("ur_program_name", "ext_control.urp");
   auto_declare<std::string>("dashboard_prefix", "/dashboard_client");
 
-  ur_monitor_ = std::make_unique<UrRobotMonitor>(get_node());
+  robot_monitor_ = std::make_unique<UrRobotMonitor>(get_node());
 
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::SUCCESS;
@@ -230,16 +231,6 @@ CombinedImpedanceController::on_configure(
       get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
           get_node()->get_name() + std::string("/data_impedance"), 1);
 
-  // Subscribe to heartbeat topic
-  m_heartbeat_subscriber = get_node()->create_subscription<std_msgs::msg::Bool>(
-      "collision_detection_heartbeat", 1,
-      std::bind(&CombinedImpedanceController::heartbeatCallback, this,
-                std::placeholders::_1));
-
-  // Publisher for robot mode
-  m_robot_mode_publisher = get_node()->create_publisher<std_msgs::msg::Int32>(
-      get_node()->get_name() + std::string("/robot_mode"), 1);
-
   // Service for controller mode switching (replaces topic-based mode command)
   mode_switch_srv_ = get_node()->create_service<std_srvs::srv::SetBool>(
       get_node()->get_name() + std::string("/controller_mode_switch"),
@@ -290,8 +281,8 @@ CombinedImpedanceController::on_configure(
         get_node()->get_name() + std::string("/debug_control_mode"), 10);
   }
 
-  // Configure UR robot monitor (service clients, parameters)
-  ur_monitor_->configure();
+  // Configure robot monitor (heartbeat, mode publisher, robot-specific setup)
+  robot_monitor_->configure(get_node()->get_name());
 
   RCLCPP_INFO(get_node()->get_logger(), "Finished Impedance on_configure");
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
@@ -302,7 +293,10 @@ controller_interface::InterfaceConfiguration
 CombinedImpedanceController::state_interface_configuration() const {
   controller_interface::InterfaceConfiguration conf =
       EffortControllerBase::state_interface_configuration();
-  for (auto &name : ur_monitor_->requiredStateInterfaces(tf_prefix)) {
+  monitor_state_iface_offset_ = conf.names.size();
+  auto monitor_ifaces = robot_monitor_->requiredStateInterfaces(tf_prefix);
+  monitor_state_iface_count_ = monitor_ifaces.size();
+  for (auto &name : monitor_ifaces) {
     conf.names.emplace_back(std::move(name));
   }
   return conf;
@@ -334,10 +328,7 @@ CombinedImpedanceController::on_activate(
   m_target_wrench = ctrl::Vector6D::Zero();
   m_ft_sensor_wrench = ctrl::Vector6D::Zero();
 
-  {
-    std::lock_guard<std::mutex> lock(heartbeat_mutex);
-    last_heartbeat_time = get_node()->get_clock()->now();
-  }
+  robot_monitor_->activate();
 
   control_mode =
       ControlMode::CARTESIAN; // default to cartesian mode on activation
@@ -364,25 +355,18 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
   // Update joint states
   Base::updateJointStates();
 
-  // Update collision heartbeat and controller state
-  updateCollisionHeartbeat();
-  if (ur_monitor_->updateControllerState(is_safe.load())) {
+  // Update robot monitor (heartbeat check, state machine, mode publish)
+  {
+    std::vector<double> monitor_values(monitor_state_iface_count_);
+    for (size_t i = 0; i < monitor_state_iface_count_; ++i) {
+      monitor_values[i] =
+          state_interfaces_[monitor_state_iface_offset_ + i].get_value();
+    }
+    robot_monitor_->updateState(monitor_values);
+  }
+  if (robot_monitor_->update()) {
     freezeDesiredPoses();
   }
-
-  // Publish mimic robot mode for high level components
-  std_msgs::msg::Int32 mode_msg;
-  mode_msg.data = static_cast<int>(ur_monitor_->mimicRobotMode());
-  m_robot_mode_publisher->publish(mode_msg);
-
-  // Update current program / safety / arm state from the UR driver
-  ur_monitor_->updateState(
-      state_interfaces_[static_cast<uint32_t>(StateInterfaces::ROBOT_MODE)]
-          .get_value(),
-      state_interfaces_[static_cast<uint32_t>(StateInterfaces::SAFETY_MODE)]
-          .get_value(),
-      state_interfaces_[static_cast<uint32_t>(StateInterfaces::PROGRAM_RUNNING)]
-          .get_value());
 
   // Compute the torque to applay at the joints
   ctrl::VectorND tau_tot = computeTorque();
@@ -429,8 +413,8 @@ void CombinedImpedanceController::updateNextTrajectoryPoint(
       get_node()->get_logger(), *get_node()->get_clock(), 2000,
       "Updating trajectory point. Elapsed time: %f seconds", traj_elapsed_);
   std::lock_guard<std::mutex> lock(traj_mutex_);
-  if (!traj_active_ || ur_monitor_->controllerState() !=
-                           UrRobotMonitor::ControllerState::RUNNING) {
+  if (!traj_active_ || robot_monitor_->controllerState() !=
+                           RobotMonitor::ControllerState::RUNNING) {
     return;
   }
   traj_elapsed_ += 0.6 * period.seconds();
@@ -464,33 +448,6 @@ void CombinedImpedanceController::updateNextTrajectoryPoint(
 
     RCLCPP_INFO_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(),
                          1000, "Setting waypoint:  %lu - %lu", idx0, idx1);
-  }
-}
-
-void CombinedImpedanceController::updateCollisionHeartbeat() {
-  rclcpp::Time current_last_heartbeat_time;
-  bool initial_heartbeat_was_received = false;
-  const auto time = get_node()->get_clock()->now();
-
-  {
-    // Read the flag and the time under the same lock to avoid race condition
-    std::lock_guard<std::mutex> lock(heartbeat_mutex);
-    current_last_heartbeat_time = last_heartbeat_time;
-    initial_heartbeat_was_received =
-        initial_heartbeat_received.load(); // atomic read
-  }
-  // Check heartbeat only if the initial one has been received
-  if (initial_heartbeat_was_received) { // Use the value read under the lock
-    double time_diff = (time - current_last_heartbeat_time).seconds();
-    if (time_diff > 0.5 && is_safe.load()) {
-      RCLCPP_INFO_THROTTLE(
-          get_node()->get_logger(), *get_node()->get_clock(), 1000,
-          "Heartbeat timed out. Setting controller to UNSAFE. Current time: "
-          "%f, Last heartbeat: %f",
-          time.seconds(), current_last_heartbeat_time.seconds());
-      is_safe.store(false); // atomic write
-      initial_heartbeat_received.store(false);
-    }
   }
 }
 
@@ -548,8 +505,8 @@ void CombinedImpedanceController::freezeDesiredPoses() {
 ctrl::Vector6D CombinedImpedanceController::computeCartMotionError() {
   // Compute the cartesian error between the current and the target frame
   KDL::Frame target_frame;
-  if (ur_monitor_->controllerState() ==
-      UrRobotMonitor::ControllerState::RUNNING) {
+  if (robot_monitor_->controllerState() ==
+      RobotMonitor::ControllerState::RUNNING) {
     target_frame = m_target_frame;
   } else { // STOPPED or WAITING, use frozen poses
     target_frame = frozen_pose_;
@@ -857,8 +814,8 @@ void CombinedImpedanceController::ftSensorWrenchCallback(
 
 void CombinedImpedanceController::targetFrameCallback(
     const geometry_msgs::msg::PoseStamped::SharedPtr target) {
-  if (ur_monitor_->controllerState() !=
-      UrRobotMonitor::ControllerState::RUNNING) {
+  if (robot_monitor_->controllerState() !=
+      RobotMonitor::ControllerState::RUNNING) {
     return; // Don't accept new poses while in a non-normal state
   }
   if (control_mode != ControlMode::CARTESIAN) {
@@ -880,36 +837,6 @@ void CombinedImpedanceController::targetFrameCallback(
                      target->pose.orientation.z, target->pose.orientation.w),
                  KDL::Vector(target->pose.position.x, target->pose.position.y,
                              target->pose.position.z));
-}
-
-void CombinedImpedanceController::heartbeatCallback(
-    const std_msgs::msg::Bool::SharedPtr msg) {
-  bool is_now_safe = msg->data;
-
-  {
-    std::lock_guard<std::mutex> lock(heartbeat_mutex);
-    last_heartbeat_time = get_node()->get_clock()->now();
-
-    if (!initial_heartbeat_received.load()) { // atomic read
-      initial_heartbeat_received.store(true); // atomic write
-      RCLCPP_INFO(get_node()->get_logger(),
-                  "Initial collision detection heartbeat received. "
-                  "Controller operational.");
-    }
-  }
-
-  // atomically set is_safe value and get the previous value back.
-  bool was_safe = is_safe.exchange(is_now_safe);
-
-  if (is_now_safe != was_safe) {
-    if (is_now_safe) {
-      RCLCPP_INFO(get_node()->get_logger(),
-                  "Controller state changed to SAFE (no collision).");
-    } else {
-      RCLCPP_WARN(get_node()->get_logger(),
-                  "Controller state changed to UNSAFE (collision detected).");
-    }
-  }
 }
 
 bool CombinedImpedanceController::modeSwitchCallback(

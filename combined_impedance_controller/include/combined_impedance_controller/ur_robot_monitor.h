@@ -8,19 +8,12 @@
 #include <std_srvs/srv/trigger.hpp>
 #include <ur_dashboard_msgs/srv/load.hpp>
 
+#include "combined_impedance_controller/robot_monitor.h"
+
 namespace combined_impedance_controller {
 
-class UrRobotMonitor {
+class UrRobotMonitor : public RobotMonitor {
 public:
-  enum class ControllerState { RUNNING, WAITING, STOPPED };
-
-  enum class MimicRobotMode {
-    UNKNOWN = 0u,
-    IDLE = 1,
-    MOVE = 2,
-    USER_STOPPED = 3,
-  };
-
   enum class RobotMode {
     NO_CONTROLLER = -1,
     DISCONNECTED = 0,
@@ -62,36 +55,26 @@ public:
 
   explicit UrRobotMonitor(rclcpp_lifecycle::LifecycleNode::SharedPtr node);
 
-  void configure();
+  void onConfigure() override;
 
-  void updateState(double robot_mode_val, double safety_mode_val,
-                   double program_running_val);
+  void updateState(const std::vector<double> &state_values) override;
 
-  /// Run the controller state machine. Call once per update() cycle.
-  /// Returns true when the controller should freeze desired poses.
-  bool updateControllerState(bool is_safe);
+  std::vector<std::string>
+  requiredStateInterfaces(const std::string &tf_prefix) const override;
 
-  bool isReady() const;
-
-  ControllerState controllerState() const { return controller_state_; }
-  MimicRobotMode mimicRobotMode() const { return mimic_robot_mode_; }
   RobotMode robotMode() const { return robot_mode_; }
   SafetyMode safetyMode() const { return safety_mode_; }
   ProgramMode programMode() const { return program_mode_; }
 
-  std::vector<std::string>
-  requiredStateInterfaces(const std::string &tf_prefix) const;
+protected:
+  bool isReady() const override;
+  void onRecoveryTick() override;
 
 private:
-  rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
-
   RobotMode robot_mode_{RobotMode::DISCONNECTED};
   SafetyMode safety_mode_{SafetyMode::UNDEFINED_SAFETY_MODE};
   ProgramMode program_mode_{ProgramMode::STOPPED};
 
-  // Controller state machine
-  ControllerState controller_state_{ControllerState::STOPPED};
-  MimicRobotMode mimic_robot_mode_{MimicRobotMode::UNKNOWN};
   void tryRestartExternalProgram();
   void tryRecoverFromStop();
 

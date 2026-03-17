@@ -12,13 +12,12 @@
 #include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
-#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <std_srvs/srv/set_bool.hpp>
 
-#include "combined_impedance_controller/ur_robot_monitor.h"
+#include "combined_impedance_controller/robot_monitor.h"
 
 #if LOGGING
 #include <matlogger2/matlogger2.h>
@@ -107,20 +106,17 @@ private:
   targetFrameCallback(const geometry_msgs::msg::PoseStamped::SharedPtr target);
   void jointTrajectoryCallback(
       const trajectory_msgs::msg::JointTrajectory::SharedPtr target);
-  void heartbeatCallback(const std_msgs::msg::Bool::SharedPtr msg);
   ctrl::Vector6D computeCartMotionError();
   ctrl::VectorND computeJointMotionError();
   ctrl::VectorND computeJointTrajectoryTaskTorque(const ctrl::VectorND &q_dot);
   ctrl::VectorND computeCartesianTaskTorque(const ctrl::MatrixND &jac,
                                             const ctrl::VectorND &q_dot,
                                             const ctrl::Matrix6D &Lambda);
-  void updateCollisionHeartbeat();
   void publishDebugTopics(const ctrl::VectorND &tau);
   void freezeDesiredPoses();
   void updateNextTrajectoryPoint(const rclcpp::Duration &period);
   static ctrl::Vector6D toVector6D(const geometry_msgs::msg::Wrench &w);
 
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr m_heartbeat_subscriber;
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr
       m_target_wrench_subscriber;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr
@@ -132,8 +128,6 @@ private:
   rclcpp::Publisher<debug_msg::msg::Debug>::SharedPtr m_data_publisher;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
       m_data_impedance_publisher;
-  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr m_robot_mode_publisher;
-
   // Debug publishers
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr
       target_pose_pub_;
@@ -220,21 +214,10 @@ private:
   };
   ControlMode control_mode;
 
-  enum class StateInterfaces {
-    ROBOT_MODE = 12,
-    SAFETY_MODE = 13,
-    PROGRAM_RUNNING = 14,
-  };
-
-  std::unique_ptr<UrRobotMonitor> ur_monitor_;
+  std::unique_ptr<RobotMonitor> robot_monitor_;
+  mutable size_t monitor_state_iface_offset_{0};
+  mutable size_t monitor_state_iface_count_{0};
   KDL::Frame frozen_pose_;
-  std::atomic<bool> is_safe{true}; ///< Safety flag (atomic for thread safety).
-  rclcpp::Time
-      last_heartbeat_time;    ///< Timestamp of the last received heartbeat.
-  std::mutex heartbeat_mutex; ///< Mutex to protect last_heartbeat_time_ access.
-  std::atomic<bool> initial_heartbeat_received{
-      false}; ///< Flag to indicate if the first heartbeat was received (atomic
-              ///< for thread safety).
 };
 
 } // namespace combined_impedance_controller
