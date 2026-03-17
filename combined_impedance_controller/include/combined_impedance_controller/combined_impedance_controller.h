@@ -1,6 +1,7 @@
 #ifndef COMBINED_IMPEDANCE_CONTROLLER_H_INCLUDED
 #define COMBINED_IMPEDANCE_CONTROLLER_H_INCLUDED
 
+#include <atomic>
 #include <mutex>
 
 #include <effort_controller_base/effort_controller_base.h>
@@ -70,34 +71,11 @@ public:
   controller_interface::return_type
   update(const rclcpp::Time &time, const rclcpp::Duration &period) override;
 
-  ctrl::VectorND computeTorque();
-
   using Base = effort_controller_base::EffortControllerBase;
 
-  // ====================================================
-  // = Config variables for cartesian impedance control =
-  // ====================================================
-  ctrl::Matrix6D m_cartesian_stiffness;
-  ctrl::Matrix6D m_cartesian_damping;
-  ctrl::Matrix6D m_cartesian_integral_gain;
-  double m_null_space_stiffness;
-  double m_null_space_damping;
-  double m_damping_ratio;
-
-  // ================================================
-  // = Config variables for joint impedance control =
-  // ================================================
-  ctrl::MatrixND m_joint_stiffness;
-  ctrl::MatrixND m_joint_damping;
-  ctrl::MatrixND m_joint_integral_gain;
-
-  // ===========================
-  // = Common config variables =
-  // ===========================
-  ctrl::Vector6D m_target_wrench;
-  std::string tf_prefix;
-
 private:
+  ctrl::VectorND computeTorque(double dt);
+
   void targetWrenchCallback(
       const geometry_msgs::msg::WrenchStamped::SharedPtr wrench);
   void ftSensorWrenchCallback(
@@ -106,17 +84,19 @@ private:
   targetFrameCallback(const geometry_msgs::msg::PoseStamped::SharedPtr target);
   void jointTrajectoryCallback(
       const trajectory_msgs::msg::JointTrajectory::SharedPtr target);
-  ctrl::Vector6D computeCartMotionError();
+  ctrl::Vector6D
+  computeCartMotionError(const KDL::Frame &target_frame_snapshot);
   ctrl::VectorND computeJointMotionError();
   ctrl::VectorND computeJointTrajectoryTaskTorque(const ctrl::VectorND &q_dot);
-  ctrl::VectorND computeCartesianTaskTorque(const ctrl::MatrixND &jac,
-                                            const ctrl::VectorND &q_dot,
-                                            const ctrl::Matrix6D &Lambda);
+  ctrl::VectorND computeCartesianTaskTorque(
+      const ctrl::MatrixND &jac, const ctrl::VectorND &q_dot,
+      const ctrl::Matrix6D &Lambda, const KDL::Frame &target_frame_snapshot);
   void publishDebugTopics(const ctrl::VectorND &tau);
   void freezeDesiredPoses();
   void updateNextTrajectoryPoint(const rclcpp::Duration &period);
   static ctrl::Vector6D toVector6D(const geometry_msgs::msg::Wrench &w);
 
+  // Subscribers
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr
       m_target_wrench_subscriber;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr
@@ -125,83 +105,90 @@ private:
       m_target_joint_trajectory_subscriber;
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr
       m_ft_sensor_subscriber;
+
+  // Publishers
   rclcpp::Publisher<debug_msg::msg::Debug>::SharedPtr m_data_publisher;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
       m_data_impedance_publisher;
-  // Debug publishers
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr
-      target_pose_pub_;
+      m_target_pose_pub;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr
-      current_pose_pub_;
+      m_current_pose_pub;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr
-      next_goal_pose_pub_;
-  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr angle_pub_;
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr tau_pub_;
-  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr control_mode_pub_;
+      m_next_goal_pose_pub;
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr m_angle_pub;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr m_tau_pub;
+  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr m_control_mode_pub;
 
   // Debug state cached by computeCartMotionError for publishDebugTopics
-  KDL::Frame debug_target_frame_;
-  KDL::Frame debug_next_goal_frame_;
-  double debug_angle_{0.0};
-  bool debug_cart_valid_{
-      false}; ///< True when cart debug data was updated this cycle.
+  KDL::Frame m_debug_target_frame;
+  KDL::Frame m_debug_next_goal_frame;
+  double m_debug_angle{0.0};
+  bool m_debug_cart_valid{false};
 
-  // Controller mode service (replaces topic-based mode switching)
-  rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr mode_switch_srv_;
-  bool modeSwitchCallback(std_srvs::srv::SetBool::Request::SharedPtr req,
+  // Controller mode service
+  rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr m_mode_switch_srv;
+  void modeSwitchCallback(std_srvs::srv::SetBool::Request::SharedPtr req,
                           std_srvs::srv::SetBool::Response::SharedPtr res);
 
   // Mode heartbeat (received from Python while in JOINT_TRAJECTORY)
-  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr mode_heartbeat_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr m_mode_heartbeat_sub;
   void modeHeartbeatCallback(const std_msgs::msg::Empty::SharedPtr msg);
-  rclcpp::Time last_mode_heartbeat_time_;
-  std::mutex mode_heartbeat_mutex_;
-  std::atomic<bool> mode_heartbeat_received_{false};
+  rclcpp::Time m_last_mode_heartbeat_time;
+  std::mutex m_mode_heartbeat_mutex;
+  std::atomic<bool> m_mode_heartbeat_received{false};
 
   // Trajectory execution state
-  std::vector<ctrl::VectorND> traj_positions_;
-  std::vector<ctrl::VectorND> traj_velocities_;
-  std::vector<double> traj_times_;
-  double traj_elapsed_{0.0};
-  bool traj_active_{false};
-  std::mutex traj_mutex_; ///< Guards traj_* and control_mode_.
+  std::vector<ctrl::VectorND> m_traj_positions;
+  std::vector<ctrl::VectorND> m_traj_velocities;
+  std::vector<double> m_traj_times;
+  double m_traj_elapsed{0.0};
+  bool m_traj_active{false};
+  std::mutex m_traj_mutex; ///< Guards traj state and control mode transitions.
   static constexpr double kModeHeartbeatTimeout{0.3}; ///< 300ms watchdog.
 
 #if LOGGING
   XBot::MatLogger2::Ptr m_logger;
 #endif
 
-  // ====================================================
-  // = Member variables for cartesian impedance control =
-  // ====================================================
+  // Config variables for cartesian impedance control
+  ctrl::Matrix6D m_cartesian_stiffness;
+  ctrl::Matrix6D m_cartesian_damping;
+  ctrl::Matrix6D m_cartesian_integral_gain;
+  double m_null_space_stiffness;
+  double m_null_space_damping;
+  double m_damping_ratio;
+
+  // Config variables for joint impedance control
+  ctrl::MatrixND m_joint_stiffness;
+  ctrl::MatrixND m_joint_damping;
+  ctrl::MatrixND m_joint_integral_gain;
+
+  // Member variables for cartesian impedance control
   KDL::Frame m_target_frame;
   KDL::Frame m_current_frame;
   ctrl::VectorND m_q_ns; // Null space configuration
   ctrl::Vector6D m_cart_motion_error_integral;
 
-  // ================================================
-  // = Member variables for joint impedance control =
-  // ================================================
-  ctrl::VectorND m_desired_joint_positions_{};
-  ctrl::VectorND m_desired_joint_velocities_{};
+  // Member variables for joint impedance control
+  ctrl::VectorND m_desired_joint_positions{};
+  ctrl::VectorND m_desired_joint_velocities{};
   ctrl::VectorND m_joint_motion_error_integral{};
 
-  // ========================================
-  // = Member variables for effort blending =
-  // ========================================
+  // Member variables for effort blending
   ctrl::VectorND m_last_tau_task{};
-  ctrl::VectorND m_blend_tau_ff_{};
-  bool blend_active_{false};  ///< Protected by traj_mutex_.
-  double blend_elapsed_{0.0}; ///< Seconds since blend started.
+  ctrl::VectorND m_blend_tau_ff{};
+  bool m_blend_active{false};  ///< Protected by m_traj_mutex.
+  double m_blend_elapsed{0.0}; ///< Seconds since blend started.
   static constexpr double kBlendTimeConstant{
       0.05}; ///< 50 ms exponential decay.
 
-  // ===========================
-  // = Common member variables =
-  // ===========================
+  // Common member variables
+  ctrl::Vector6D m_target_wrench;
   ctrl::Vector6D m_ft_sensor_wrench;
   std::string m_ft_sensor_ref_link;
   KDL::Frame m_ft_sensor_transform;
+  std::string m_tf_prefix;
 
   ctrl::MatrixND m_identity;
 
@@ -212,12 +199,16 @@ private:
     CARTESIAN,
     JOINT_TRAJECTORY,
   };
-  ControlMode control_mode;
+  std::atomic<ControlMode> m_control_mode{ControlMode::CARTESIAN};
 
-  std::unique_ptr<RobotMonitor> robot_monitor_;
-  mutable size_t monitor_state_iface_offset_{0};
-  mutable size_t monitor_state_iface_count_{0};
-  KDL::Frame frozen_pose_;
+  /// Protects m_target_wrench, m_ft_sensor_wrench, and m_target_frame
+  /// (written from subscription callbacks, read from update thread).
+  std::mutex m_input_mutex;
+
+  std::unique_ptr<RobotMonitor> m_robot_monitor;
+  mutable size_t m_monitor_state_iface_offset{0};
+  mutable size_t m_monitor_state_iface_count{0};
+  KDL::Frame m_frozen_pose;
 };
 
 } // namespace combined_impedance_controller
