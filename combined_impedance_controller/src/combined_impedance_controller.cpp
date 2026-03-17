@@ -753,40 +753,51 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
   ctrl::Matrix6D Lambda = (jac * M.data.inverse() * jac.transpose()).inverse();
 
   // Initialize the torque vectors
-  ctrl::VectorND tau_task(Base::m_joint_number),
-      tau_joint(Base::m_joint_number), tau_null(Base::m_joint_number),
-      tau_ext(Base::m_joint_number), tau(Base::m_joint_number);
+  ctrl::VectorND tau_null(Base::m_joint_number), tau_ext(Base::m_joint_number),
+      tau(Base::m_joint_number);
 
   // init tau to zero
   tau.setZero();
   tau_ext.setZero();
-  tau_task.setZero();
-  tau_joint.setZero();
   tau_null.setZero();
 
   if (control_mode == ControlMode::JOINT_TRAJECTORY) {
-    tau_task = computeJointTrajectoryTaskTorque(q_dot);
+    const auto tau_joint = computeJointTrajectoryTaskTorque(q_dot);
+    tau += tau_joint;
+
+    // Apply optional blending
+    if (blend_active_) {
+      // Compute the blending feedforward torque and apply blending if needed
+      const double blend_gain = std::exp(-blend_elapsed_ / kBlendTimeConstant);
+      tau += blend_gain * (m_blend_tau_ff_ - tau_joint);
+
+      RCLCPP_INFO_STREAM(get_node()->get_logger(),
+                         << "Tau: " << tau.transpose() << "\n"
+                         << "tau_joint: " << tau_joint.transpose() << "\n");
+
+      // Advance blend timer after arm has been updated.
+      blend_elapsed_ += 0.001;                         // 1 kHz control loop
+      if (blend_elapsed_ > 5.0 * kBlendTimeConstant) { // ~250 ms — gain < 0.7%
+        blend_active_ = false;
+        RCLCPP_INFO(get_node()->get_logger(), "Torque blend complete.");
+      }
+    }
   } else if (control_mode == ControlMode::CARTESIAN) {
-    tau_task = computeCartesianTaskTorque(jac, q_dot, Lambda);
+    const auto tau_task = computeCartesianTaskTorque(jac, q_dot, Lambda);
+    // Save the last task torque for blending
+    m_last_tau_task = tau_task;
+    tau += tau_task;
   } else {
     RCLCPP_ERROR(get_node()->get_logger(), "Unknown control mode!");
     throw std::runtime_error("Unknown control mode!");
   }
-
-  // Save the last task torque for blending
-  m_last_tau_task = tau_task;
-
-  // Compute the blending feedforward torque and apply blending if needed
-  const double blend_gain =
-      blend_active_ ? std::exp(-blend_elapsed_ / kBlendTimeConstant) : 0.0;
-  tau = tau + blend_gain * m_blend_tau_ff_;
 
   KDL::JntArray tau_coriolis(Base::m_joint_number),
       tau_gravity(Base::m_joint_number);
   if (m_compensate_coriolis) {
     Base::m_dyn_solver->JntToCoriolis(Base::m_joint_positions,
                                       Base::m_joint_velocities, tau_coriolis);
-    tau = tau + tau_coriolis.data;
+    tau += tau_coriolis.data;
   }
   // Computes the Jacobian derivative * q_dot, negligible for most of the robot
   Eigen::VectorXd j_tran_lambda_jdot_qdot =
@@ -870,8 +881,8 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
   } else {
     tau_ext = ctrl::VectorND::Zero(Base::m_joint_number);
   }
-  // Sum up all torques
-  tau += tau_task + tau_null + tau_ext;
+  // Sum up remaining torques
+  tau += tau_null + tau_ext;
   return tau;
 }
 
@@ -999,6 +1010,9 @@ bool CombinedImpedanceController::modeSwitchCallback(
         return true;
       }
       m_blend_tau_ff_ = m_last_tau_task;
+      RCLCPP_INFO_STREAM(get_node()->get_logger(),
+                         << "m_last_tau_task: " << m_last_tau_task.transpose()
+                         << "\n");
       blend_elapsed_ = 0.0;
       blend_active_ = true;
       traj_active_ =
