@@ -812,7 +812,8 @@ ctrl::VectorND CombinedImpedanceController::computeJointTrajectoryTaskTorque(
              .cwiseMin(0.1);
 
   const ctrl::VectorND stiffness_torque = K_d * motion_error;
-  const ctrl::VectorND damping_torque = D_d * (-q_dot);
+  const ctrl::VectorND damping_torque =
+      D_d * (m_desired_joint_velocities_ - q_dot);
   const ctrl::VectorND integral_torque = K_i * m_joint_motion_error_integral;
 
   // Compute the task torque
