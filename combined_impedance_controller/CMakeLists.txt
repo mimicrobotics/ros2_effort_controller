@@ -24,6 +24,7 @@ find_package(debug_msg REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(ur_dashboard_msgs REQUIRED)
 
 # Try to find MatLogger2 if logging is enabled
 if (LOGGING)
@@ -48,6 +49,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
 	std_msgs
 	std_srvs
 	sensor_msgs
+	ur_dashboard_msgs
 )
 
 if (LOGGING_ENABLED)

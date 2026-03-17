@@ -17,6 +17,8 @@
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <std_srvs/srv/set_bool.hpp>
+#include <std_srvs/srv/trigger.hpp>
+#include <ur_dashboard_msgs/srv/load.hpp>
 
 #define DEBUG 0
 #if LOGGING
@@ -284,6 +286,25 @@ private:
   std::atomic<bool> initial_heartbeat_received{
       false}; ///< Flag to indicate if the first heartbeat was received (atomic
               ///< for thread safety).
+
+  // External program auto-restart
+  enum class ProgramRestartState {
+    IDLE,             ///< Not attempting restart.
+    LOADING,          ///< load_program service call in flight.
+    WAITING_FOR_PLAY, ///< Load succeeded, about to call play.
+    PLAYING,          ///< play service call in flight.
+  };
+  ProgramRestartState program_restart_state_{ProgramRestartState::IDLE};
+  rclcpp::Client<ur_dashboard_msgs::srv::Load>::SharedPtr load_program_client_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr play_client_;
+  rclcpp::Time last_program_restart_attempt_;
+  static constexpr double kProgramRestartCooldown{
+      3.0};                     ///< Seconds between retry attempts.
+  std::string ur_program_name_; ///< UR program filename to load (e.g.
+                                ///< "ext_control.urp").
+  std::string
+      dashboard_prefix_; ///< Service namespace prefix for dashboard client.
+  void tryRestartExternalProgram();
 };
 
 } // namespace combined_impedance_controller

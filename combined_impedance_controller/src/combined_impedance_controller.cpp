@@ -51,6 +51,10 @@ CombinedImpedanceController::on_init() {
   // Define upper limit for impedance forces
   auto_declare<double>("max_impedance_force", 70.0);
 
+  // External program auto-restart parameters
+  auto_declare<std::string>("ur_program_name", "ext_control.urp");
+  auto_declare<std::string>("dashboard_prefix", "/dashboard_client");
+
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::SUCCESS;
 }
@@ -284,6 +288,16 @@ CombinedImpedanceController::on_configure(
         get_node()->get_name() + std::string("/debug_control_mode"), 10);
   }
 
+  // Service clients for automatic external program restart
+  ur_program_name_ = get_node()->get_parameter("ur_program_name").as_string();
+  dashboard_prefix_ = get_node()->get_parameter("dashboard_prefix").as_string();
+  load_program_client_ =
+      get_node()->create_client<ur_dashboard_msgs::srv::Load>(
+          dashboard_prefix_ + "/load_program");
+  play_client_ = get_node()->create_client<std_srvs::srv::Trigger>(
+      dashboard_prefix_ + "/play");
+  last_program_restart_attempt_ = get_node()->get_clock()->now();
+
   RCLCPP_INFO(get_node()->get_logger(), "Finished Impedance on_configure");
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::SUCCESS;
@@ -512,6 +526,9 @@ void CombinedImpedanceController::updateControllerState() {
     mimic_robot_mode = MimicRobotMode::MOVE;
   }
 
+  // Try to auto-restart external program if conditions are met
+  tryRestartExternalProgram();
+
   // Publish mimic robot mode for high level components as well
   std_msgs::msg::Int32 mode_msg;
   mode_msg.data = static_cast<int>(mimic_robot_mode);
@@ -542,6 +559,100 @@ void CombinedImpedanceController::updateRobotState() {
     program_mode = program_mode_new;
     RCLCPP_INFO(get_node()->get_logger(), "Program mode switched to: %s",
                 toString(program_mode));
+  }
+}
+
+void CombinedImpedanceController::tryRestartExternalProgram() {
+  const auto now = get_node()->get_clock()->now();
+
+  // Reset state machine when program is playing again
+  if (program_mode == ProgramMode::PLAYING) {
+    if (program_restart_state_ != ProgramRestartState::IDLE) {
+      RCLCPP_INFO(get_node()->get_logger(),
+                  "External program is playing again.");
+    }
+    program_restart_state_ = ProgramRestartState::IDLE;
+    return;
+  }
+
+  // Only attempt restart when robot is RUNNING, safety is NORMAL, but program
+  // is STOPPED
+  if (robot_mode != RobotMode::RUNNING || safety_mode != SafetyMode::NORMAL ||
+      program_mode != ProgramMode::STOPPED) {
+    return;
+  }
+
+  switch (program_restart_state_) {
+  case ProgramRestartState::IDLE: {
+    // Enforce cooldown between attempts
+    if ((now - last_program_restart_attempt_).seconds() <
+        kProgramRestartCooldown) {
+      return;
+    }
+    if (!load_program_client_->service_is_ready()) {
+      RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(),
+                           5000,
+                           "load_program service not available, waiting...");
+      return;
+    }
+    RCLCPP_INFO(get_node()->get_logger(),
+                "Program stopped while robot is ready. Loading %s...",
+                ur_program_name_.c_str());
+    auto request = std::make_shared<ur_dashboard_msgs::srv::Load::Request>();
+    request->filename = ur_program_name_;
+    load_program_client_->async_send_request(
+        request,
+        [this](
+            rclcpp::Client<ur_dashboard_msgs::srv::Load>::SharedFuture future) {
+          auto result = future.get();
+          if (result->success) {
+            RCLCPP_INFO(get_node()->get_logger(), "%s loaded successfully.",
+                        ur_program_name_.c_str());
+            program_restart_state_ = ProgramRestartState::WAITING_FOR_PLAY;
+          } else {
+            RCLCPP_WARN(get_node()->get_logger(), "Failed to load %s: %s",
+                        ur_program_name_.c_str(), result->answer.c_str());
+            program_restart_state_ = ProgramRestartState::IDLE;
+            last_program_restart_attempt_ = get_node()->get_clock()->now();
+          }
+        });
+    program_restart_state_ = ProgramRestartState::LOADING;
+    last_program_restart_attempt_ = now;
+    break;
+  }
+  case ProgramRestartState::LOADING:
+    // Waiting for load callback to fire
+    break;
+  case ProgramRestartState::WAITING_FOR_PLAY: {
+    if (!play_client_->service_is_ready()) {
+      RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(),
+                           5000, "play service not available, waiting...");
+      return;
+    }
+    RCLCPP_INFO(get_node()->get_logger(), "Playing %s...",
+                ur_program_name_.c_str());
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    play_client_->async_send_request(
+        request,
+        [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+          auto result = future.get();
+          if (result->success) {
+            RCLCPP_INFO(get_node()->get_logger(),
+                        "%s play command sent successfully.",
+                        ur_program_name_.c_str());
+          } else {
+            RCLCPP_WARN(get_node()->get_logger(), "Failed to play %s: %s",
+                        ur_program_name_.c_str(), result->message.c_str());
+          }
+          program_restart_state_ = ProgramRestartState::IDLE;
+          last_program_restart_attempt_ = get_node()->get_clock()->now();
+        });
+    program_restart_state_ = ProgramRestartState::PLAYING;
+    break;
+  }
+  case ProgramRestartState::PLAYING:
+    // Waiting for play callback to fire
+    break;
   }
 }
 
@@ -780,10 +891,6 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
             std::exp(-blend_elapsed_ / kBlendTimeConstant);
         tau += blend_gain * (m_blend_tau_ff_ - tau_joint);
 
-        RCLCPP_INFO_STREAM(get_node()->get_logger(),
-                           << "Tau: " << tau.transpose() << "\n"
-                           << "tau_joint: " << tau_joint.transpose() << "\n");
-
         // Advance blend timer after arm has been updated.
         blend_elapsed_ += 0.001; // 1 kHz control loop
         if (blend_elapsed_ >
@@ -1000,8 +1107,8 @@ bool CombinedImpedanceController::modeSwitchCallback(
       }
       m_blend_tau_ff_ = m_last_tau_task;
       RCLCPP_INFO_STREAM(get_node()->get_logger(),
-                         << "m_last_tau_task: " << m_last_tau_task.transpose()
-                         << "\n");
+                         "m_last_tau_task: " << m_last_tau_task.transpose()
+                                             << "\n");
       blend_elapsed_ = 0.0;
       blend_active_ = true;
       traj_active_ =
