@@ -141,6 +141,8 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr
       next_goal_pose_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr angle_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr tau_pub_;
+  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr control_mode_pub_;
 
   // Controller mode service (replaces topic-based mode switching)
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr mode_switch_srv_;

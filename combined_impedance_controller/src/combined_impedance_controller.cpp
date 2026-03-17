@@ -276,6 +276,14 @@ CombinedImpedanceController::on_configure(
     angle_pub_ = get_node()->create_publisher<std_msgs::msg::Float64>(
         get_node()->get_name() + std::string("/debug_orientation_error_angle"),
         10);
+
+    // Publish overall tau
+    tau_pub_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
+        get_node()->get_name() + std::string("/debug_tau"), 10);
+
+    // Publish control mode
+    control_mode_pub_ = get_node()->create_publisher<std_msgs::msg::Int32>(
+        get_node()->get_name() + std::string("/debug_control_mode"), 10);
   }
 
   RCLCPP_INFO(get_node()->get_logger(), "Finished Impedance on_configure");
@@ -883,6 +891,19 @@ ctrl::VectorND CombinedImpedanceController::computeTorque() {
   }
   // Sum up remaining torques
   tau += tau_null + tau_ext;
+
+  if (m_debug_topics && tau_pub_) {
+    std_msgs::msg::Float64MultiArray tau_msg;
+    tau_msg.data.assign(tau.data(), tau.data() + tau.size());
+    tau_pub_->publish(tau_msg);
+  }
+
+  if (m_debug_topics && control_mode_pub_) {
+    std_msgs::msg::Int32 mode_msg;
+    mode_msg.data = static_cast<int32_t>(control_mode);
+    control_mode_pub_->publish(mode_msg);
+  }
+
   return tau;
 }
 
