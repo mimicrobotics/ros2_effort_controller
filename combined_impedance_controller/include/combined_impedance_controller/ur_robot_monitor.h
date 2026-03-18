@@ -92,6 +92,7 @@ private:
     POWERING_ON,
     RELEASING_BRAKES,
   };
+  static const char *toString(RecoveryState state);
   RecoveryState recovery_state_{RecoveryState::IDLE};
   RecoveryState recovery_next_state_{RecoveryState::IDLE};
   SafetyMode recovery_trigger_mode_{SafetyMode::NORMAL};

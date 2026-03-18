@@ -141,16 +141,22 @@ void UrRobotMonitor::tryRecoverFromStop() {
     switch (recovery_trigger_mode_) {
     case SafetyMode::PROTECTIVE_STOP:
       recovery_next_state_ = RecoveryState::UNLOCKING_PROTECTIVE_STOP;
+      RCLCPP_INFO(node_->get_logger(), "Recovery next state: %s",
+                  toString(recovery_next_state_));
       break;
     case SafetyMode::ROBOT_EMERGENCY_STOP:
     case SafetyMode::SYSTEM_EMERGENCY_STOP:
     case SafetyMode::SAFEGUARD_STOP:
     case SafetyMode::AUTOMATIC_MODE_SAFEGUARD_STOP:
       recovery_next_state_ = RecoveryState::RELEASING_BRAKES;
+      RCLCPP_INFO(node_->get_logger(), "Recovery next state: %s",
+                  toString(recovery_next_state_));
       break;
     case SafetyMode::FAULT:
     case SafetyMode::VIOLATION:
       recovery_next_state_ = RecoveryState::RESTARTING_SAFETY;
+      RCLCPP_INFO(node_->get_logger(), "Recovery next state: %s",
+                  toString(recovery_next_state_));
       break;
     default:
       RCLCPP_WARN(node_->get_logger(),
@@ -165,21 +171,29 @@ void UrRobotMonitor::tryRecoverFromStop() {
 
   case RecoveryState::UNLOCKING_PROTECTIVE_STOP:
     recovery_next_state_ = RecoveryState::IDLE;
+    RCLCPP_INFO(node_->get_logger(), "Recovery next state: %s",
+                toString(recovery_next_state_));
     asyncTrigger(unlock_protective_stop_client_, "unlock_protective_stop");
     break;
 
   case RecoveryState::RESTARTING_SAFETY:
     recovery_next_state_ = RecoveryState::POWERING_ON;
+    RCLCPP_INFO(node_->get_logger(), "Recovery next state: %s",
+                toString(recovery_next_state_));
     asyncTrigger(restart_safety_client_, "restart_safety");
     break;
 
   case RecoveryState::POWERING_ON:
     recovery_next_state_ = RecoveryState::RELEASING_BRAKES;
+    RCLCPP_INFO(node_->get_logger(), "Recovery next state: %s",
+                toString(recovery_next_state_));
     asyncTrigger(power_on_client_, "power_on");
     break;
 
   case RecoveryState::RELEASING_BRAKES:
     recovery_next_state_ = RecoveryState::IDLE;
+    RCLCPP_INFO(node_->get_logger(), "Recovery next state: %s",
+                toString(recovery_next_state_));
     asyncTrigger(brake_release_client_, "brake_release");
     break;
   }
@@ -346,6 +360,25 @@ const char *UrRobotMonitor::toString(ProgramMode mode) {
     return "PAUSED";
   default:
     return "UNKNOWN_PROGRAM_MODE";
+  }
+}
+
+const char *UrRobotMonitor::toString(RecoveryState state) {
+  switch (state) {
+  case RecoveryState::IDLE:
+    return "IDLE";
+  case RecoveryState::CLOSING_POPUP:
+    return "CLOSING_POPUP";
+  case RecoveryState::UNLOCKING_PROTECTIVE_STOP:
+    return "UNLOCKING_PROTECTIVE_STOP";
+  case RecoveryState::RESTARTING_SAFETY:
+    return "RESTARTING_SAFETY";
+  case RecoveryState::POWERING_ON:
+    return "POWERING_ON";
+  case RecoveryState::RELEASING_BRAKES:
+    return "RELEASING_BRAKES";
+  default:
+    return "UNKNOWN_RECOVERY_STATE";
   }
 }
 
