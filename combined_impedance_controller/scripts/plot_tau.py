@@ -9,24 +9,28 @@ import threading
 import matplotlib.pyplot as plt
 import rclpy
 from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Float64MultiArray, Int32
 
 CONTROL_MODE_NAMES = {0: "CARTESIAN", 1: "JOINT_TRAJECTORY"}
 
 
 class TauRecorder(Node):
-    def __init__(self, tau_topic: str, mode_topic: str):
+    def __init__(self, tau_topic: str, mode_topic: str, target_frame_topic: str):
         super().__init__("tau_recorder")
         self.timestamps: list[float] = []
         self.samples: list[list[float]] = []
         self.mode_timestamps: list[float] = []
         self.mode_values: list[int] = []
+        self.target_timestamps: list[float] = []
+        self.target_xyz: list[list[float]] = []
         self.t0: float | None = None
 
         self.create_subscription(Float64MultiArray, tau_topic, self._tau_cb, 10)
         self.create_subscription(Int32, mode_topic, self._mode_cb, 10)
+        self.create_subscription(PoseStamped, target_frame_topic, self._target_cb, 10)
         self.get_logger().info(
-            f"Subscribing to {tau_topic} and {mode_topic} — press Ctrl+C to stop and plot"
+            f"Subscribing to {tau_topic}, {mode_topic}, and {target_frame_topic} — press Ctrl+C to stop and plot"
         )
 
     def _stamp(self) -> float:
@@ -43,6 +47,11 @@ class TauRecorder(Node):
         self.mode_timestamps.append(self._stamp())
         self.mode_values.append(msg.data)
 
+    def _target_cb(self, msg: PoseStamped):
+        p = msg.pose.position
+        self.target_timestamps.append(self._stamp())
+        self.target_xyz.append([p.x, p.y, p.z])
+
 
 def main():
     parser = argparse.ArgumentParser(description="Record and plot tau from debug topic")
@@ -56,10 +65,15 @@ def main():
         default="/combined_impedance_controller/debug_control_mode",
         help="Control mode topic (default: /combined_impedance_controller/debug_control_mode)",
     )
+    parser.add_argument(
+        "--target-frame-topic",
+        default="/combined_impedance_controller_left/target_frame",
+        help="Target frame topic (default: /combined_impedance_controller_left/target_frame)",
+    )
     args = parser.parse_args()
 
     rclpy.init()
-    node = TauRecorder(args.topic, args.mode_topic)
+    node = TauRecorder(args.topic, args.mode_topic, args.target_frame_topic)
 
     # Spin in a thread so the main thread can catch Ctrl+C cleanly
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
@@ -92,7 +106,29 @@ def main():
     for t, label in zip(transition_times, transition_labels):
         ax.axvline(t, color="k", linestyle="--", alpha=0.6, label=label)
 
-    # De-duplicate legend entries
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel("Tau [Nm]")
+    ax.set_title("Joint torques over time")
+    ax.grid(True)
+
+    # Overlay target frame position on secondary y-axis
+    if node.target_xyz:
+        ax2 = ax.twinx()
+        coord_labels = ["x", "y", "z"]
+        coord_styles = ["--", "-.", ":"]
+        for i, (lbl, ls) in enumerate(zip(coord_labels, coord_styles)):
+            ax2.plot(
+                node.target_timestamps,
+                [s[i] for s in node.target_xyz],
+                linestyle=ls,
+                linewidth=1.5,
+                alpha=0.8,
+                label=f"target {lbl}",
+            )
+        ax2.set_ylabel("Target position [m]")
+        ax2.legend(loc="upper left")
+
+    # De-duplicate legend entries for primary axis
     handles, labels = ax.get_legend_handles_labels()
     seen = set()
     unique = [
@@ -100,12 +136,8 @@ def main():
         for handle, label in zip(handles, labels)
         if label not in seen and not seen.add(label)
     ]
-    ax.legend(*zip(*unique))
+    ax.legend(*zip(*unique), loc="upper right")
 
-    ax.set_xlabel("Time [s]")
-    ax.set_ylabel("Tau [Nm]")
-    ax.set_title("Joint torques over time")
-    ax.grid(True)
     plt.tight_layout()
     plt.show()
 
