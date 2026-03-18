@@ -16,7 +16,13 @@ CONTROL_MODE_NAMES = {0: "CARTESIAN", 1: "JOINT_TRAJECTORY"}
 
 
 class TauRecorder(Node):
-    def __init__(self, tau_topic: str, mode_topic: str, target_frame_topic: str):
+    def __init__(
+        self,
+        tau_topic: str,
+        mode_topic: str,
+        target_frame_topic: str,
+        current_frame_topic: str,
+    ):
         super().__init__("tau_recorder")
         self.timestamps: list[float] = []
         self.samples: list[list[float]] = []
@@ -24,13 +30,16 @@ class TauRecorder(Node):
         self.mode_values: list[int] = []
         self.target_timestamps: list[float] = []
         self.target_xyz: list[list[float]] = []
+        self.current_timestamps: list[float] = []
+        self.current_xyz: list[list[float]] = []
         self.t0: float | None = None
 
         self.create_subscription(Float64MultiArray, tau_topic, self._tau_cb, 10)
         self.create_subscription(Int32, mode_topic, self._mode_cb, 10)
         self.create_subscription(PoseStamped, target_frame_topic, self._target_cb, 10)
+        self.create_subscription(PoseStamped, current_frame_topic, self._current_cb, 10)
         self.get_logger().info(
-            f"Subscribing to {tau_topic}, {mode_topic}, and {target_frame_topic} — press Ctrl+C to stop and plot"
+            f"Subscribing to {tau_topic}, {mode_topic}, {target_frame_topic}, and {current_frame_topic} — press Ctrl+C to stop and plot"
         )
 
     def _stamp(self) -> float:
@@ -52,6 +61,11 @@ class TauRecorder(Node):
         self.target_timestamps.append(self._stamp())
         self.target_xyz.append([p.x, p.y, p.z])
 
+    def _current_cb(self, msg: PoseStamped):
+        p = msg.pose.position
+        self.current_timestamps.append(self._stamp())
+        self.current_xyz.append([p.x, p.y, p.z])
+
 
 def main():
     parser = argparse.ArgumentParser(description="Record and plot tau from debug topic")
@@ -70,10 +84,17 @@ def main():
         default="/combined_impedance_controller_left/target_frame",
         help="Target frame topic (default: /combined_impedance_controller_left/target_frame)",
     )
+    parser.add_argument(
+        "--current-frame-topic",
+        default="/combined_impedance_controller_right/debug_current_frame",
+        help="Current frame topic (default: /combined_impedance_controller_right/debug_current_frame)",
+    )
     args = parser.parse_args()
 
     rclpy.init()
-    node = TauRecorder(args.topic, args.mode_topic, args.target_frame_topic)
+    node = TauRecorder(
+        args.topic, args.mode_topic, args.target_frame_topic, args.current_frame_topic
+    )
 
     # Spin in a thread so the main thread can catch Ctrl+C cleanly
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
@@ -111,21 +132,32 @@ def main():
     ax.set_title("Joint torques over time")
     ax.grid(True)
 
-    # Overlay target frame position on secondary y-axis
-    if node.target_xyz:
+    # Overlay target and current frame positions on secondary y-axis
+    if node.target_xyz or node.current_xyz:
         ax2 = ax.twinx()
         coord_labels = ["x", "y", "z"]
         coord_styles = ["--", "-.", ":"]
-        for i, (lbl, ls) in enumerate(zip(coord_labels, coord_styles)):
-            ax2.plot(
-                node.target_timestamps,
-                [s[i] for s in node.target_xyz],
-                linestyle=ls,
-                linewidth=1.5,
-                alpha=0.8,
-                label=f"target {lbl}",
-            )
-        ax2.set_ylabel("Target position [m]")
+        if node.target_xyz:
+            for i, (lbl, ls) in enumerate(zip(coord_labels, coord_styles)):
+                ax2.plot(
+                    node.target_timestamps,
+                    [s[i] for s in node.target_xyz],
+                    linestyle=ls,
+                    linewidth=1.5,
+                    alpha=0.8,
+                    label=f"target {lbl}",
+                )
+        if node.current_xyz:
+            for i, (lbl, ls) in enumerate(zip(coord_labels, coord_styles)):
+                ax2.plot(
+                    node.current_timestamps,
+                    [s[i] for s in node.current_xyz],
+                    linestyle=ls,
+                    linewidth=1.5,
+                    alpha=0.5,
+                    label=f"current {lbl}",
+                )
+        ax2.set_ylabel("Position [m]")
         ax2.legend(loc="upper left")
 
     # De-duplicate legend entries for primary axis
