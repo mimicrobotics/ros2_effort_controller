@@ -212,9 +212,9 @@ void UrRobotMonitor::tryRestartExternalProgram() {
   }
 
   // Only attempt restart when robot is RUNNING, safety is NORMAL, but program
-  // is STOPPED
+  // is STOPPED or PAUSED
   if (robot_mode_ != RobotMode::RUNNING || safety_mode_ != SafetyMode::NORMAL ||
-      program_mode_ != ProgramMode::STOPPED) {
+      program_mode_ == ProgramMode::PLAYING) {
     return;
   }
 

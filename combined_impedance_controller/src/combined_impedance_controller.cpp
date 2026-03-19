@@ -578,10 +578,10 @@ ctrl::VectorND CombinedImpedanceController::computeJointTrajectoryTaskTorque(
 
   // Compute the motion error
   const ctrl::VectorND motion_error = computeJointMotionError();
-  RCLCPP_INFO_STREAM_THROTTLE(get_node()->get_logger(),
-                              *get_node()->get_clock(), 250,
-                              "Motion error: \n"
-                                  << motion_error.transpose() << "\n");
+  RCLCPP_DEBUG_STREAM_THROTTLE(get_node()->get_logger(),
+                               *get_node()->get_clock(), 250,
+                               "Motion error: \n"
+                                   << motion_error.transpose() << "\n");
 
   // Compute the stiffness and damping in the joint space
   const ctrl::MatrixND K_d = m_joint_stiffness;
