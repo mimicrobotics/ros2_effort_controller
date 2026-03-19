@@ -209,6 +209,11 @@ private:
   mutable size_t m_monitor_state_iface_offset{0};
   mutable size_t m_monitor_state_iface_count{0};
   KDL::Frame m_frozen_pose;
+
+  // Update frequency tracking
+  unsigned long m_freq_call_count{0};
+  rclcpp::Time m_freq_last_report_time;
+  bool m_freq_initialized{false};
 };
 
 } // namespace combined_impedance_controller

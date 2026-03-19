@@ -673,6 +673,26 @@ ctrl::VectorND CombinedImpedanceController::computeTorque(double dt) {
                         m_control_mode.load() == ControlMode::JOINT_TRAJECTORY
                             ? "JOINT"
                             : "CARTESIAN");
+
+  // Log average update frequency every 5 seconds
+  {
+    const auto now = get_node()->get_clock()->now();
+    if (!m_freq_initialized) {
+      m_freq_last_report_time = now;
+      m_freq_call_count = 0;
+      m_freq_initialized = true;
+    }
+    ++m_freq_call_count;
+    const double elapsed = (now - m_freq_last_report_time).seconds();
+    if (elapsed >= 5.0) {
+      const double avg_hz = m_freq_call_count / elapsed;
+      RCLCPP_INFO(get_node()->get_logger(),
+                  "computeTorque avg update rate: %.1f Hz", avg_hz);
+      m_freq_call_count = 0;
+      m_freq_last_report_time = now;
+    }
+  }
+
   // Redefine joints velocities in Eigen format
   ctrl::VectorND q = Base::m_joint_positions.data;
   ctrl::VectorND q_dot = Base::m_joint_velocities.data;
