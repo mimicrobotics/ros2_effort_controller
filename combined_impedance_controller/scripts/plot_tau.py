@@ -6,6 +6,8 @@ import signal
 import sys
 import threading
 
+import math
+
 import matplotlib
 
 matplotlib.use("Agg")
@@ -39,12 +41,16 @@ class TauRecorder(Node):
         self.total_samples: list[list[float]] = []
         self.commanded_timestamps: list[float] = []
         self.commanded_samples: list[list[float]] = []
+        self.velocity_limit_timestamps: list[float] = []
+        self.velocity_limit_samples: list[list[float]] = []
         self.mode_timestamps: list[float] = []
         self.mode_values: list[int] = []
         self.target_timestamps: list[float] = []
         self.target_xyz: list[list[float]] = []
+        self.target_rpy: list[list[float]] = []
         self.current_timestamps: list[float] = []
         self.current_xyz: list[list[float]] = []
+        self.current_rpy: list[list[float]] = []
         self.t0: float | None = None
 
         self.create_subscription(Float64MultiArray, tau_topic, self._tau_cb, 10)
@@ -57,11 +63,14 @@ class TauRecorder(Node):
         self.create_subscription(
             Float64MultiArray, tau_commanded_topic, self._tau_commanded_cb, 10
         )
+        self.create_subscription(
+            Float64MultiArray, tau_velocity_limit_topic, self._tau_velocity_limit_cb, 10
+        )
         self.create_subscription(Int32, mode_topic, self._mode_cb, 10)
         self.create_subscription(PoseStamped, target_frame_topic, self._target_cb, 10)
         self.create_subscription(PoseStamped, current_frame_topic, self._current_cb, 10)
         self.get_logger().info(
-            f"Subscribing to {tau_topic}, {tau_damping_topic}, {tau_total_topic}, {tau_commanded_topic}, {mode_topic}, {target_frame_topic}, and {current_frame_topic} — press Ctrl+C to stop and plot"
+            f"Subscribing to {tau_topic}, {tau_damping_topic}, {tau_total_topic}, {tau_commanded_topic}, {tau_velocity_limit_topic}, {mode_topic}, {target_frame_topic}, and {current_frame_topic} — press Ctrl+C to stop and plot"
         )
 
     def _stamp(self) -> float:
@@ -86,52 +95,84 @@ class TauRecorder(Node):
         self.commanded_timestamps.append(self._stamp())
         self.commanded_samples.append(list(msg.data))
 
+    def _tau_velocity_limit_cb(self, msg: Float64MultiArray):
+        self.velocity_limit_timestamps.append(self._stamp())
+        self.velocity_limit_samples.append(list(msg.data))
+
     def _mode_cb(self, msg: Int32):
         self.mode_timestamps.append(self._stamp())
         self.mode_values.append(msg.data)
 
+    @staticmethod
+    def _quat_to_euler(q) -> list[float]:
+        """Convert quaternion (x, y, z, w) to euler angles (roll, pitch, yaw)."""
+        sinr_cosp = 2.0 * (q.w * q.x + q.y * q.z)
+        cosr_cosp = 1.0 - 2.0 * (q.x * q.x + q.y * q.y)
+        roll = math.atan2(sinr_cosp, cosr_cosp)
+
+        sinp = 2.0 * (q.w * q.y - q.z * q.x)
+        pitch = math.asin(max(-1.0, min(1.0, sinp)))
+
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+
+        return [roll, pitch, yaw]
+
     def _target_cb(self, msg: PoseStamped):
         p = msg.pose.position
+        o = msg.pose.orientation
         self.target_timestamps.append(self._stamp())
         self.target_xyz.append([p.x, p.y, p.z])
+        self.target_rpy.append(self._quat_to_euler(o))
 
     def _current_cb(self, msg: PoseStamped):
         p = msg.pose.position
+        o = msg.pose.orientation
         self.current_timestamps.append(self._stamp())
         self.current_xyz.append([p.x, p.y, p.z])
+        self.current_rpy.append(self._quat_to_euler(o))
 
 
-def _show_scrollable(fig):
-    """Display a matplotlib figure in a Tk window with a vertical scrollbar."""
+def _show_scrollable(figs: list[tuple[plt.Figure, str]]):
+    """Display matplotlib figures in Tk windows with vertical scrollbars.
+
+    *figs* is a list of (figure, title) tuples.  Each gets its own window;
+    they all share a single Tk mainloop.
+    """
     import tkinter as tk
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
     root = tk.Tk()
-    root.title("Tau Plot")
+    root.withdraw()  # hide the empty root window
 
-    screen_h = root.winfo_screenheight()
-    win_h = min(int(screen_h * 0.85), 900)
-    win_w = 1200
-    root.geometry(f"{win_w}x{win_h}")
+    for fig, title in figs:
+        win = tk.Toplevel(root)
+        win.title(title)
 
-    canvas = tk.Canvas(root)
-    scrollbar = tk.Scrollbar(root, orient="vertical", command=canvas.yview)
-    canvas.configure(yscrollcommand=scrollbar.set)
-    scrollbar.pack(side="right", fill="y")
-    canvas.pack(side="left", fill="both", expand=True)
+        screen_h = win.winfo_screenheight()
+        win_h = min(int(screen_h * 0.85), 900)
+        win_w = 1200
+        win.geometry(f"{win_w}x{win_h}")
 
-    frame = tk.Frame(canvas)
-    canvas.create_window((0, 0), window=frame, anchor="nw")
+        canvas = tk.Canvas(win)
+        scrollbar = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
 
-    fig_canvas = FigureCanvasTkAgg(fig, master=frame)
-    fig_canvas.draw()
-    fig_canvas.get_tk_widget().pack()
+        frame = tk.Frame(canvas)
+        canvas.create_window((0, 0), window=frame, anchor="nw")
 
-    frame.update_idletasks()
-    canvas.configure(scrollregion=canvas.bbox("all"))
+        fig_canvas = FigureCanvasTkAgg(fig, master=frame)
+        fig_canvas.draw()
+        fig_canvas.get_tk_widget().pack()
 
-    canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
-    canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
+        frame.update_idletasks()
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+        canvas.bind_all("<Button-4>", lambda e, c=canvas: c.yview_scroll(-3, "units"))
+        canvas.bind_all("<Button-5>", lambda e, c=canvas: c.yview_scroll(3, "units"))
 
     root.mainloop()
 
@@ -159,6 +200,11 @@ def main():
         help="Tau commanded topic (default: /combined_impedance_controller_right/debug_tau_commanded)",
     )
     parser.add_argument(
+        "--velocity-limit-topic",
+        default="/combined_impedance_controller_right/debug_tau_velocity_limit",
+        help="Tau velocity limit topic (default: /combined_impedance_controller_right/debug_tau_velocity_limit)",
+    )
+    parser.add_argument(
         "--mode-topic",
         default="/combined_impedance_controller_right/debug_control_mode",
         help="Control mode topic (default: /combined_impedance_controller_right/debug_control_mode)",
@@ -181,6 +227,7 @@ def main():
         args.damping_topic,
         args.total_topic,
         args.commanded_topic,
+        args.velocity_limit_topic,
         args.mode_topic,
         args.target_frame_topic,
         args.current_frame_topic,
@@ -211,9 +258,11 @@ def main():
 
     has_damping = bool(node.damping_samples)
     has_xyz = bool(node.target_xyz) or bool(node.current_xyz)
+    has_rpy = bool(node.target_rpy) or bool(node.current_rpy)
     n_joints = len(node.samples[0])
     n_xyz = 3 if has_xyz else 0
-    n_rows = n_joints + n_xyz
+    n_rpy = 3 if has_rpy else 0
+    n_rows = n_joints + n_xyz + n_rpy
     fig, axes = plt.subplots(
         n_rows, 1, sharex=True, squeeze=False, figsize=(12, 3 * n_rows)
     )
@@ -242,6 +291,12 @@ def main():
                 node.commanded_timestamps,
                 [s[j] for s in node.commanded_samples],
                 label="tau commanded",
+            )
+        if node.velocity_limit_samples:
+            ax.plot(
+                node.velocity_limit_timestamps,
+                [s[j] for s in node.velocity_limit_samples],
+                label="tau velocity limit",
             )
         for t, label in zip(transition_times, transition_labels):
             ax.axvline(t, color="k", linestyle="--", alpha=0.6, label=label)
@@ -289,9 +344,98 @@ def main():
             ]
             ax.legend(*zip(*unique), loc="upper right")
 
+    # Target vs Current RPY (orientation) plots
+    if has_rpy:
+        rpy_names = ["Roll", "Pitch", "Yaw"]
+        for i, name in enumerate(rpy_names):
+            ax = axes[n_joints + n_xyz + i, 0]
+            if node.target_rpy:
+                ax.plot(
+                    node.target_timestamps,
+                    [s[i] for s in node.target_rpy],
+                    label=f"target {name}",
+                )
+            if node.current_rpy:
+                ax.plot(
+                    node.current_timestamps,
+                    [s[i] for s in node.current_rpy],
+                    label=f"current {name}",
+                )
+            for t, label in zip(transition_times, transition_labels):
+                ax.axvline(t, color="k", linestyle="--", alpha=0.6, label=label)
+            ax.set_ylabel(f"{name} [rad]")
+            ax.set_title(f"Target vs Current — {name}")
+            ax.grid(True)
+            handles, labels = ax.get_legend_handles_labels()
+            seen = set()
+            unique = [
+                (h, l)
+                for h, l in zip(handles, labels)
+                if l not in seen and not seen.add(l)
+            ]
+            ax.legend(*zip(*unique), loc="upper right")
+
     axes[-1, 0].set_xlabel("Time [s]")
     fig.tight_layout()
-    _show_scrollable(fig)
+
+    # --- Second figure: Target vs Current frame (one plot per dimension) ---
+    figures: list[tuple[plt.Figure, str]] = [(fig, "Tau Plot")]
+
+    has_frame = bool(node.target_xyz) or bool(node.current_xyz)
+    if has_frame:
+        dim_names = ["X", "Y", "Z", "Roll", "Pitch", "Yaw"]
+        dim_units = ["m", "m", "m", "rad", "rad", "rad"]
+        n_dims = len(dim_names)
+        fig2, axes2 = plt.subplots(
+            n_dims, 1, sharex=True, squeeze=False, figsize=(12, 3 * n_dims)
+        )
+        for i, (name, unit) in enumerate(zip(dim_names, dim_units)):
+            ax = axes2[i, 0]
+            if i < 3:  # XYZ
+                if node.target_xyz:
+                    ax.plot(
+                        node.target_timestamps,
+                        [s[i] for s in node.target_xyz],
+                        label=f"target {name}",
+                    )
+                if node.current_xyz:
+                    ax.plot(
+                        node.current_timestamps,
+                        [s[i] for s in node.current_xyz],
+                        label=f"current {name}",
+                    )
+            else:  # RPY
+                ri = i - 3
+                if node.target_rpy:
+                    ax.plot(
+                        node.target_timestamps,
+                        [s[ri] for s in node.target_rpy],
+                        label=f"target {name}",
+                    )
+                if node.current_rpy:
+                    ax.plot(
+                        node.current_timestamps,
+                        [s[ri] for s in node.current_rpy],
+                        label=f"current {name}",
+                    )
+            for t, label in zip(transition_times, transition_labels):
+                ax.axvline(t, color="k", linestyle="--", alpha=0.6, label=label)
+            ax.set_ylabel(f"{name} [{unit}]")
+            ax.set_title(f"Target vs Current — {name}")
+            ax.grid(True)
+            handles, labels = ax.get_legend_handles_labels()
+            seen = set()
+            unique = [
+                (h, l)
+                for h, l in zip(handles, labels)
+                if l not in seen and not seen.add(l)
+            ]
+            ax.legend(*zip(*unique), loc="upper right")
+        axes2[-1, 0].set_xlabel("Time [s]")
+        fig2.tight_layout()
+        figures.append((fig2, "Frame Plot"))
+
+    _show_scrollable(figures)
 
 
 if __name__ == "__main__":
