@@ -714,18 +714,33 @@ ctrl::VectorND CombinedImpedanceController::computeCartesianTaskTorque(
 
 void CombinedImpedanceController::applyJointVelocityLimits(
     ctrl::VectorND &tau) {
+  constexpr double kBufferRatio = 0.2;
+
   for (Eigen::Index i = 0; i < tau.size(); ++i) {
     const double limit = m_joint_velocity_limits(i);
     if (limit <= 0.0) {
       continue; // No limit configured for this joint
     }
+
     const double vel = Base::m_joint_velocities(i);
-    if (vel > limit) {
-      // Joint is over the positive speed limit — apply braking torque
-      tau(i) = std::min(tau(i), -m_velocity_limit_damping * (vel - limit));
-    } else if (vel < -limit) {
-      // Joint is over the negative speed limit — apply braking torque
-      tau(i) = std::max(tau(i), -m_velocity_limit_damping * (vel + limit));
+    const double abs_vel = std::abs(vel);
+    const double buffer_start = (1.0 - kBufferRatio) * limit;
+
+    if (abs_vel > limit) {
+      // Hard clamp: joint exceeded the limit — override with braking torque
+      if (vel > 0.0) {
+        tau(i) = std::min(tau(i), -m_velocity_limit_damping * (vel - limit));
+      } else {
+        tau(i) = std::max(tau(i), -m_velocity_limit_damping * (vel + limit));
+      }
+    } else if (abs_vel > buffer_start) {
+      // Soft buffer zone: smoothly ramp up a braking torque as velocity
+      // approaches the limit. Uses smoothstep (3t²-2t³) for C1 continuity.
+      const double t = (abs_vel - buffer_start) / (limit - buffer_start);
+      const double alpha = t * t * (3.0 - 2.0 * t);
+      const double sign = (vel > 0.0) ? 1.0 : -1.0;
+      tau(i) -=
+          alpha * m_velocity_limit_damping * sign * (abs_vel - buffer_start);
     }
   }
 }
