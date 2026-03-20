@@ -274,7 +274,10 @@ CombinedImpedanceController::on_configure(
 
     // Publish overall tau
     m_tau_pub = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
-        get_node()->get_name() + std::string("/debug_tau"), 10);
+        get_node()->get_name() + std::string("/debug_tau_damping"), 10);
+
+    m_tau_pub2 = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
+        get_node()->get_name() + std::string("/debug_tau_stiffness"), 10);
 
     // Publish control mode
     m_control_mode_pub = get_node()->create_publisher<std_msgs::msg::Int32>(
@@ -451,7 +454,7 @@ void CombinedImpedanceController::updateNextTrajectoryPoint(
 }
 
 void CombinedImpedanceController::publishDebugTopics(
-    const ctrl::VectorND &tau) {
+    const ctrl::VectorND &tau_stiffness, const ctrl::VectorND &tau_damping) {
   // Cartesian-mode debug (target/current/next_goal poses + angle)
   if (m_debug_cart_valid) {
     const auto stamp = get_node()->now();
@@ -472,8 +475,15 @@ void CombinedImpedanceController::publishDebugTopics(
   // Tau and control mode (always published in debug mode)
   if (m_tau_pub) {
     std_msgs::msg::Float64MultiArray tau_msg;
-    tau_msg.data.assign(tau.data(), tau.data() + tau.size());
+    tau_msg.data.assign(tau_stiffness.data(),
+                        tau_stiffness.data() + tau_stiffness.size());
     m_tau_pub->publish(tau_msg);
+  }
+  if (m_tau_pub2) {
+    std_msgs::msg::Float64MultiArray tau_msg;
+    tau_msg.data.assign(tau_damping.data(),
+                        tau_damping.data() + tau_damping.size());
+    m_tau_pub2->publish(tau_msg);
   }
 
   if (m_control_mode_pub) {
@@ -638,7 +648,11 @@ ctrl::VectorND CombinedImpedanceController::computeCartesianTaskTorque(
       jac.transpose() * (K_i * m_cart_motion_error_integral);
 
   // Compute the task torque
-  return stiffness_torque + damping_torque + integral_torque;
+  if (m_debug_topics) {
+    publishDebugTopics(stiffness_torque, damping_torque);
+  }
+
+  return stiffness_torque + damping_torque; // + integral_torque;
 }
 
 ctrl::VectorND CombinedImpedanceController::computeTorque(double dt) {
@@ -813,11 +827,11 @@ ctrl::VectorND CombinedImpedanceController::computeTorque(double dt) {
             << "\n");
   }
   // Sum up remaining torques
-  tau += tau_null + tau_ext;
+  // tau += tau_null + tau_ext;
 
-  if (m_debug_topics) {
-    publishDebugTopics(tau);
-  }
+  // if (m_debug_topics) {
+  //   publishDebugTopics(tau);
+  // }
 
   return tau;
 }

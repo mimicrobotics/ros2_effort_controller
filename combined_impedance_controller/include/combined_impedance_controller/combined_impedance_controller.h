@@ -91,7 +91,8 @@ private:
   ctrl::VectorND computeCartesianTaskTorque(
       const ctrl::MatrixND &jac, const ctrl::VectorND &q_dot,
       const ctrl::Matrix6D &Lambda, const KDL::Frame &target_frame_snapshot);
-  void publishDebugTopics(const ctrl::VectorND &tau);
+  void publishDebugTopics(const ctrl::VectorND &tau_stiffness,
+                          const ctrl::VectorND &tau_damping);
   void freezeDesiredPoses();
   void updateNextTrajectoryPoint(const rclcpp::Duration &period);
   static ctrl::Vector6D toVector6D(const geometry_msgs::msg::Wrench &w);
@@ -118,6 +119,7 @@ private:
       m_next_goal_pose_pub;
   rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr m_angle_pub;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr m_tau_pub;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr m_tau_pub2;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr m_control_mode_pub;
 
   // Debug state cached by computeCartMotionError for publishDebugTopics

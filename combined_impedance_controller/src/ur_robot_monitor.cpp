@@ -99,7 +99,7 @@ void UrRobotMonitor::asyncTrigger(TriggerClient::SharedPtr &client,
 
 void UrRobotMonitor::tryRecoverFromStop() {
   // Nothing to do when safety is normal
-  if (safety_mode_ == SafetyMode::NORMAL) {
+  if (safety_mode_ == SafetyMode::NORMAL && robot_mode_ == RobotMode::RUNNING) {
     if (recovery_state_ != RecoveryState::IDLE) {
       RCLCPP_INFO(node_->get_logger(), "Recovery: safety mode is normal.");
       recovery_state_ = RecoveryState::IDLE;
@@ -108,7 +108,17 @@ void UrRobotMonitor::tryRecoverFromStop() {
   }
 
   // Don't start a new recovery during transient states (RECOVERY, BOOTING)
-  if (safety_mode_ == SafetyMode::RECOVERY) {
+  if (safety_mode_ == SafetyMode::RECOVERY ||
+      robot_mode_ == RobotMode::BOOTING) {
+    recovery_state_ = RecoveryState::INIT;
+    return;
+  }
+
+  // Don't start a new recovery while robot or system is e-stopped
+  if (safety_mode_ == SafetyMode::SYSTEM_EMERGENCY_STOP ||
+      safety_mode_ == SafetyMode::ROBOT_EMERGENCY_STOP) {
+    RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                         "Waiting for E-Stop release...");
     return;
   }
 
@@ -126,37 +136,62 @@ void UrRobotMonitor::tryRecoverFromStop() {
       return;
     }
     recovery_trigger_mode_ = safety_mode_;
-    RCLCPP_INFO(node_->get_logger(), "Recovery: starting recovery from %s...",
-                toString(safety_mode_));
-    recovery_state_ = RecoveryState::CLOSING_POPUP;
+    RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                         "Recovery: starting recovery from %s...",
+                         toString(safety_mode_));
+    recovery_state_ = RecoveryState::INIT;
   }
 
+  // State transitions based on
+  // https://docs.universal-robots.com/tutorials/controlling-robot-externally/stop-recovery.html
   switch (recovery_state_) {
   case RecoveryState::IDLE:
     break;
-
-  case RecoveryState::CLOSING_POPUP:
-    // All recovery paths start with close_safety_popup.
-    // Determine what comes after based on the trigger mode.
+  case RecoveryState::INIT:
+    // Determine what comes first based on the trigger mode.
     switch (recovery_trigger_mode_) {
-    case SafetyMode::PROTECTIVE_STOP:
-      recovery_next_state_ = RecoveryState::UNLOCKING_PROTECTIVE_STOP;
-      RCLCPP_INFO(node_->get_logger(), "Recovery next state: %s",
-                  toString(recovery_next_state_));
-      break;
-    case SafetyMode::ROBOT_EMERGENCY_STOP:
-    case SafetyMode::SYSTEM_EMERGENCY_STOP:
-    case SafetyMode::SAFEGUARD_STOP:
-    case SafetyMode::AUTOMATIC_MODE_SAFEGUARD_STOP:
-      recovery_next_state_ = RecoveryState::RELEASING_BRAKES;
-      RCLCPP_INFO(node_->get_logger(), "Recovery next state: %s",
-                  toString(recovery_next_state_));
-      break;
     case SafetyMode::FAULT:
-    case SafetyMode::VIOLATION:
       recovery_next_state_ = RecoveryState::RESTARTING_SAFETY;
-      RCLCPP_INFO(node_->get_logger(), "Recovery next state: %s",
-                  toString(recovery_next_state_));
+      asyncTrigger(close_safety_popup_client_, "close_safety_popup");
+      RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                           "Recovery next state: %s",
+                           toString(recovery_next_state_));
+      break;
+    case SafetyMode::PROTECTIVE_STOP:
+      recovery_state_ = RecoveryState::UNLOCKING_PROTECTIVE_STOP;
+      RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                           "Recovery next state: %s",
+                           toString(recovery_state_));
+      break;
+    case SafetyMode::NORMAL:
+      switch (robot_mode_) {
+      case RobotMode::IDLE:
+        recovery_next_state_ = RecoveryState::RELEASING_BRAKES;
+        asyncTrigger(close_safety_popup_client_, "close_safety_popup");
+        RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                             "Recovery next state: %s",
+                             toString(recovery_next_state_));
+        break;
+      case RobotMode::POWER_OFF:
+        recovery_state_ = RecoveryState::POWERING_ON;
+        RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                             "Recovery next state: %s",
+                             toString(recovery_state_));
+        break;
+      case RobotMode::POWER_ON:
+        recovery_state_ = RecoveryState::RELEASING_BRAKES;
+        RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                             "Recovery next state: %s",
+                             toString(recovery_state_));
+        break;
+      default:
+        RCLCPP_WARN(node_->get_logger(),
+                    "Recovery (INIT): no recovery procedure for %s / %s.",
+                    toString(recovery_trigger_mode_), toString(robot_mode_));
+        recovery_state_ = RecoveryState::INIT;
+        last_recovery_attempt_ = now;
+        break;
+      }
       break;
     default:
       RCLCPP_WARN(node_->get_logger(),
@@ -166,35 +201,74 @@ void UrRobotMonitor::tryRecoverFromStop() {
       last_recovery_attempt_ = now;
       return;
     }
-    asyncTrigger(close_safety_popup_client_, "close_safety_popup");
     break;
 
   case RecoveryState::UNLOCKING_PROTECTIVE_STOP:
-    recovery_next_state_ = RecoveryState::IDLE;
-    RCLCPP_INFO(node_->get_logger(), "Recovery next state: %s",
-                toString(recovery_next_state_));
+    recovery_next_state_ = RecoveryState::INIT;
+    RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                         "Recovery next state: %s",
+                         toString(recovery_next_state_));
     asyncTrigger(unlock_protective_stop_client_, "unlock_protective_stop");
     break;
 
   case RecoveryState::RESTARTING_SAFETY:
-    recovery_next_state_ = RecoveryState::POWERING_ON;
-    RCLCPP_INFO(node_->get_logger(), "Recovery next state: %s",
-                toString(recovery_next_state_));
-    asyncTrigger(restart_safety_client_, "restart_safety");
+    switch (robot_mode_) {
+    case RobotMode::POWER_OFF:
+      recovery_next_state_ = RecoveryState::POWERING_ON;
+      RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                           "Recovery next state: %s",
+                           toString(recovery_next_state_));
+      asyncTrigger(restart_safety_client_, "restart_safety");
+      break;
+    default:
+      RCLCPP_WARN(
+          node_->get_logger(),
+          "Recovery (RESTARTING_SAFETY): no recovery procedure for %s / %s.",
+          toString(recovery_trigger_mode_), toString(robot_mode_));
+      recovery_state_ = RecoveryState::INIT;
+      last_recovery_attempt_ = now;
+      break;
+    }
     break;
 
   case RecoveryState::POWERING_ON:
-    recovery_next_state_ = RecoveryState::RELEASING_BRAKES;
-    RCLCPP_INFO(node_->get_logger(), "Recovery next state: %s",
-                toString(recovery_next_state_));
-    asyncTrigger(power_on_client_, "power_on");
+    switch (robot_mode_) {
+    case RobotMode::IDLE:
+    case RobotMode::POWER_OFF:
+      recovery_next_state_ = RecoveryState::RELEASING_BRAKES;
+      RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                           "Recovery next state: %s",
+                           toString(recovery_next_state_));
+      asyncTrigger(power_on_client_, "power_on");
+      break;
+    default:
+      RCLCPP_WARN(node_->get_logger(),
+                  "Recovery (POWERING_ON): no recovery procedure for %s / %s.",
+                  toString(recovery_trigger_mode_), toString(robot_mode_));
+      recovery_state_ = RecoveryState::INIT;
+      last_recovery_attempt_ = now;
+      break;
+    }
     break;
 
   case RecoveryState::RELEASING_BRAKES:
-    recovery_next_state_ = RecoveryState::IDLE;
-    RCLCPP_INFO(node_->get_logger(), "Recovery next state: %s",
-                toString(recovery_next_state_));
-    asyncTrigger(brake_release_client_, "brake_release");
+    switch (robot_mode_) {
+    case RobotMode::IDLE:
+      recovery_next_state_ = RecoveryState::IDLE;
+      RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                           "Recovery next state: %s",
+                           toString(recovery_next_state_));
+      asyncTrigger(power_on_client_, "brake_release");
+      break;
+    default:
+      RCLCPP_WARN(
+          node_->get_logger(),
+          "Recovery (RELEASING_BRAKES): no recovery procedure for %s / %s.",
+          toString(recovery_trigger_mode_), toString(robot_mode_));
+      recovery_state_ = RecoveryState::INIT;
+      last_recovery_attempt_ = now;
+      break;
+    }
     break;
   }
 }
@@ -365,10 +439,10 @@ const char *UrRobotMonitor::toString(ProgramMode mode) {
 
 const char *UrRobotMonitor::toString(RecoveryState state) {
   switch (state) {
+  case RecoveryState::INIT:
+    return "INIT";
   case RecoveryState::IDLE:
     return "IDLE";
-  case RecoveryState::CLOSING_POPUP:
-    return "CLOSING_POPUP";
   case RecoveryState::UNLOCKING_PROTECTIVE_STOP:
     return "UNLOCKING_PROTECTIVE_STOP";
   case RecoveryState::RESTARTING_SAFETY:

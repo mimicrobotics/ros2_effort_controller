@@ -89,13 +89,13 @@ def main():
     )
     parser.add_argument(
         "--mode-topic",
-        default="/combined_impedance_controller/debug_control_mode",
-        help="Control mode topic (default: /combined_impedance_controller/debug_control_mode)",
+        default="/combined_impedance_controller_right/debug_control_mode",
+        help="Control mode topic (default: /combined_impedance_controller_right/debug_control_mode)",
     )
     parser.add_argument(
         "--target-frame-topic",
-        default="/combined_impedance_controller_left/target_frame",
-        help="Target frame topic (default: /combined_impedance_controller_left/target_frame)",
+        default="/combined_impedance_controller_right/target_frame",
+        help="Target frame topic (default: /combined_impedance_controller_right/target_frame)",
     )
     parser.add_argument(
         "--current-frame-topic",

@@ -85,8 +85,8 @@ private:
 
   // Stop recovery state machine
   enum class RecoveryState {
+    INIT,
     IDLE,
-    CLOSING_POPUP,
     UNLOCKING_PROTECTIVE_STOP,
     RESTARTING_SAFETY,
     POWERING_ON,
