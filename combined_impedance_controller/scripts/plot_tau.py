@@ -6,6 +6,9 @@ import signal
 import sys
 import threading
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import rclpy
 from rclpy.node import Node
@@ -97,6 +100,41 @@ class TauRecorder(Node):
         self.current_xyz.append([p.x, p.y, p.z])
 
 
+def _show_scrollable(fig):
+    """Display a matplotlib figure in a Tk window with a vertical scrollbar."""
+    import tkinter as tk
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+    root = tk.Tk()
+    root.title("Tau Plot")
+
+    screen_h = root.winfo_screenheight()
+    win_h = min(int(screen_h * 0.85), 900)
+    win_w = 1200
+    root.geometry(f"{win_w}x{win_h}")
+
+    canvas = tk.Canvas(root)
+    scrollbar = tk.Scrollbar(root, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=scrollbar.set)
+    scrollbar.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+
+    frame = tk.Frame(canvas)
+    canvas.create_window((0, 0), window=frame, anchor="nw")
+
+    fig_canvas = FigureCanvasTkAgg(fig, master=frame)
+    fig_canvas.draw()
+    fig_canvas.get_tk_widget().pack()
+
+    frame.update_idletasks()
+    canvas.configure(scrollregion=canvas.bbox("all"))
+
+    canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
+    canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
+
+    root.mainloop()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Record and plot tau from debug topic")
     parser.add_argument(
@@ -171,9 +209,12 @@ def main():
             transition_labels.append(CONTROL_MODE_NAMES.get(v, f"MODE_{v}"))
 
     has_damping = bool(node.damping_samples)
+    has_xyz = bool(node.target_xyz) or bool(node.current_xyz)
     n_joints = len(node.samples[0])
+    n_xyz = 3 if has_xyz else 0
+    n_rows = n_joints + n_xyz
     fig, axes = plt.subplots(
-        n_joints, 1, sharex=True, squeeze=False, figsize=(10, 3 * n_joints)
+        n_rows, 1, sharex=True, squeeze=False, figsize=(12, 3 * n_rows)
     )
 
     for j in range(n_joints):
@@ -216,10 +257,40 @@ def main():
         ]
         ax.legend(*zip(*unique), loc="upper right")
 
-    axes[-1, 0].set_xlabel("Time [s]")
+    # Target vs Current XYZ plots
+    if has_xyz:
+        axis_names = ["X", "Y", "Z"]
+        for i, name in enumerate(axis_names):
+            ax = axes[n_joints + i, 0]
+            if node.target_xyz:
+                ax.plot(
+                    node.target_timestamps,
+                    [s[i] for s in node.target_xyz],
+                    label=f"target {name}",
+                )
+            if node.current_xyz:
+                ax.plot(
+                    node.current_timestamps,
+                    [s[i] for s in node.current_xyz],
+                    label=f"current {name}",
+                )
+            for t, label in zip(transition_times, transition_labels):
+                ax.axvline(t, color="k", linestyle="--", alpha=0.6, label=label)
+            ax.set_ylabel(f"{name} [m]")
+            ax.set_title(f"Target vs Current — {name}")
+            ax.grid(True)
+            handles, labels = ax.get_legend_handles_labels()
+            seen = set()
+            unique = [
+                (h, l)
+                for h, l in zip(handles, labels)
+                if l not in seen and not seen.add(l)
+            ]
+            ax.legend(*zip(*unique), loc="upper right")
 
-    plt.tight_layout()
-    plt.show()
+    axes[-1, 0].set_xlabel("Time [s]")
+    fig.tight_layout()
+    _show_scrollable(fig)
 
 
 if __name__ == "__main__":
