@@ -207,6 +207,12 @@ private:
   ctrl::VectorND m_last_stiffness_torque;
   ctrl::VectorND m_last_damping_torque;
 
+  // Per-joint velocity limits (rad/s). Zero means no limit for that joint.
+  ctrl::VectorND m_joint_velocity_limits;
+  double m_velocity_limit_damping{
+      50.0}; ///< Braking gain when over speed limit.
+  void applyJointVelocityLimits(ctrl::VectorND &tau);
+
   enum class ControlMode {
     CARTESIAN,
     JOINT_TRAJECTORY,

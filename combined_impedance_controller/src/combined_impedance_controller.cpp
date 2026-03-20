@@ -52,6 +52,11 @@ CombinedImpedanceController::on_init() {
   // Define upper limit for impedance forces
   auto_declare<double>("max_impedance_force", 70.0);
 
+  // Per-joint velocity limits (rad/s). Empty or all-zero = no limiting.
+  auto_declare<std::vector<double>>("joint_velocity_limits",
+                                    std::vector<double>());
+  auto_declare<double>("velocity_limit_damping", 50.0);
+
   // External program auto-restart parameters (declared here for the UR monitor)
   auto_declare<std::string>("ur_program_name", "ext_control.urp");
   auto_declare<std::string>("dashboard_prefix", "/dashboard_client");
@@ -196,6 +201,29 @@ CombinedImpedanceController::on_configure(
               m_compensate_dJdq);
   // Set nullspace damping
   m_null_space_damping = 2 * sqrt(m_null_space_stiffness);
+
+  // Set per-joint velocity limits
+  const std::vector<double> vel_limits =
+      get_node()->get_parameter("joint_velocity_limits").as_double_array();
+  m_joint_velocity_limits = ctrl::VectorND::Zero(Base::m_joint_number);
+  if (!vel_limits.empty()) {
+    if (vel_limits.size() != Base::m_joint_number) {
+      RCLCPP_ERROR(get_node()->get_logger(),
+                   "joint_velocity_limits size does not match joint number: "
+                   "%zu != %zu",
+                   vel_limits.size(), Base::m_joint_number);
+      return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+          CallbackReturn::ERROR;
+    }
+    for (size_t i = 0; i < Base::m_joint_number; ++i) {
+      m_joint_velocity_limits(i) = vel_limits[i];
+    }
+    RCLCPP_INFO_STREAM(get_node()->get_logger(),
+                       "Joint velocity limits (rad/s): "
+                           << m_joint_velocity_limits.transpose());
+  }
+  m_velocity_limit_damping =
+      get_node()->get_parameter("velocity_limit_damping").as_double();
 
   // Set the identity matrix with dimension of the joint space
   m_identity = ctrl::MatrixND::Identity(m_joint_number, m_joint_number);
@@ -382,6 +410,9 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
   }
 
   ctrl::VectorND tau_tot = computeTorque(period.seconds());
+
+  // Enforce per-joint velocity limits
+  applyJointVelocityLimits(tau_tot);
 
   // Saturation of the torque
   Base::computeJointEffortCmds(tau_tot);
@@ -679,6 +710,24 @@ ctrl::VectorND CombinedImpedanceController::computeCartesianTaskTorque(
   m_last_damping_torque = damping_torque;
 
   return stiffness_torque + damping_torque; // + integral_torque;
+}
+
+void CombinedImpedanceController::applyJointVelocityLimits(
+    ctrl::VectorND &tau) {
+  for (Eigen::Index i = 0; i < tau.size(); ++i) {
+    const double limit = m_joint_velocity_limits(i);
+    if (limit <= 0.0) {
+      continue; // No limit configured for this joint
+    }
+    const double vel = Base::m_joint_velocities(i);
+    if (vel > limit) {
+      // Joint is over the positive speed limit — apply braking torque
+      tau(i) = std::min(tau(i), -m_velocity_limit_damping * (vel - limit));
+    } else if (vel < -limit) {
+      // Joint is over the negative speed limit — apply braking torque
+      tau(i) = std::max(tau(i), -m_velocity_limit_damping * (vel + limit));
+    }
+  }
 }
 
 ctrl::VectorND CombinedImpedanceController::computeTorque(double dt) {
