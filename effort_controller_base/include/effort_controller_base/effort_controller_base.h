@@ -212,6 +212,7 @@ protected:
   KDL::JntArray m_old_joint_velocities;
   KDL::JntArray m_simulated_joint_motion;
   std::vector<std::string> m_joint_names;
+  ctrl::VectorND m_efforts;
 
 private:
   std::vector<std::string> m_cmd_interface_types;
@@ -223,7 +224,6 @@ private:
       std::reference_wrapper<hardware_interface::LoanedCommandInterface>>
       m_joint_cmd_pos_handles;
 
-  ctrl::VectorND m_efforts;
   std::string m_controller_name;
 
   // Against multi initialization in multi inheritance scenarios

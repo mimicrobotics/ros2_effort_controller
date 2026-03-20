@@ -92,7 +92,9 @@ private:
       const ctrl::MatrixND &jac, const ctrl::VectorND &q_dot,
       const ctrl::Matrix6D &Lambda, const KDL::Frame &target_frame_snapshot);
   void publishDebugTopics(const ctrl::VectorND &tau_stiffness,
-                          const ctrl::VectorND &tau_damping);
+                          const ctrl::VectorND &tau_damping,
+                          const ctrl::VectorND &tau_total,
+                          const ctrl::VectorND &tau_commanded);
   void freezeDesiredPoses();
   void updateNextTrajectoryPoint(const rclcpp::Duration &period);
   static ctrl::Vector6D toVector6D(const geometry_msgs::msg::Wrench &w);
@@ -118,8 +120,14 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr
       m_next_goal_pose_pub;
   rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr m_angle_pub;
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr m_tau_pub;
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr m_tau_pub2;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
+      m_tau_stiffness_pub;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
+      m_tau_damping_pub;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
+      m_tau_total_pub;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
+      m_tau_commanded_pub;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr m_control_mode_pub;
 
   // Debug state cached by computeCartMotionError for publishDebugTopics
@@ -196,6 +204,8 @@ private:
 
   bool m_compensate_dJdq = false;
   bool m_debug_topics = false;
+  ctrl::VectorND m_last_stiffness_torque;
+  ctrl::VectorND m_last_damping_torque;
 
   enum class ControlMode {
     CARTESIAN,

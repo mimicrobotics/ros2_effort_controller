@@ -38,7 +38,9 @@ class TauRecorder(Node):
         self.t0: float | None = None
 
         self.create_subscription(Float64MultiArray, tau_topic, self._tau_cb, 10)
-        self.create_subscription(Float64MultiArray, tau_damping_topic, self._tau_damping_cb, 10)
+        self.create_subscription(
+            Float64MultiArray, tau_damping_topic, self._tau_damping_cb, 10
+        )
         self.create_subscription(Int32, mode_topic, self._mode_cb, 10)
         self.create_subscription(PoseStamped, target_frame_topic, self._target_cb, 10)
         self.create_subscription(PoseStamped, current_frame_topic, self._current_cb, 10)
@@ -79,13 +81,13 @@ def main():
     parser = argparse.ArgumentParser(description="Record and plot tau from debug topic")
     parser.add_argument(
         "--topic",
-        default="/combined_impedance_controller/debug_tau_stiffness",
-        help="Tau topic (default: /combined_impedance_controller/debug_tau)",
+        default="/combined_impedance_controller_right/debug_tau_stiffness",
+        help="Tau topic (default: /combined_impedance_controller_right/debug_tau_stiffness)",
     )
     parser.add_argument(
         "--damping-topic",
-        default="/combined_impedance_controller/debug_tau_damping",
-        help="Tau damping topic (default: /combined_impedance_controller/debug_tau_damping)",
+        default="/combined_impedance_controller_right/debug_tau_damping",
+        help="Tau damping topic (default: /combined_impedance_controller_right/debug_tau_damping)",
     )
     parser.add_argument(
         "--mode-topic",
@@ -106,7 +108,11 @@ def main():
 
     rclpy.init()
     node = TauRecorder(
-        args.topic, args.damping_topic, args.mode_topic, args.target_frame_topic, args.current_frame_topic
+        args.topic,
+        args.damping_topic,
+        args.mode_topic,
+        args.target_frame_topic,
+        args.current_frame_topic,
     )
 
     # Spin in a thread so the main thread can catch Ctrl+C cleanly
