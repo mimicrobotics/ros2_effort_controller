@@ -93,6 +93,7 @@ private:
       const ctrl::Matrix6D &Lambda, const KDL::Frame &target_frame_snapshot);
   void publishDebugTopics(const ctrl::VectorND &tau_stiffness,
                           const ctrl::VectorND &tau_damping,
+                          const ctrl::VectorND &tau_velocity_limit,
                           const ctrl::VectorND &tau_total,
                           const ctrl::VectorND &tau_commanded);
   void freezeDesiredPoses();
@@ -128,6 +129,8 @@ private:
       m_tau_total_pub;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
       m_tau_commanded_pub;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
+      m_tau_velocity_limit_pub;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr m_control_mode_pub;
 
   // Debug state cached by computeCartMotionError for publishDebugTopics
@@ -211,7 +214,7 @@ private:
   ctrl::VectorND m_joint_velocity_limits;
   double m_velocity_limit_damping{
       50.0}; ///< Braking gain when over speed limit.
-  void applyJointVelocityLimits(ctrl::VectorND &tau);
+  ctrl::VectorND applyJointVelocityLimits(ctrl::VectorND &tau);
 
   enum class ControlMode {
     CARTESIAN,

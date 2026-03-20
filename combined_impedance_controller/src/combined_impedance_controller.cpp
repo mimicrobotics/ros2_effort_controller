@@ -317,6 +317,11 @@ CombinedImpedanceController::on_configure(
         get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
             get_node()->get_name() + std::string("/debug_tau_commanded"), 10);
 
+    m_tau_velocity_limit_pub =
+        get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
+            get_node()->get_name() + std::string("/debug_tau_velocity_limit"),
+            10);
+
     // Publish control mode
     m_control_mode_pub = get_node()->create_publisher<std_msgs::msg::Int32>(
         get_node()->get_name() + std::string("/debug_control_mode"), 10);
@@ -412,7 +417,7 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
   ctrl::VectorND tau_tot = computeTorque(period.seconds());
 
   // Enforce per-joint velocity limits
-  applyJointVelocityLimits(tau_tot);
+  ctrl::VectorND tau_vel_limit = applyJointVelocityLimits(tau_tot);
 
   // Saturation of the torque
   Base::computeJointEffortCmds(tau_tot);
@@ -426,8 +431,8 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
 
   // Compute the task torque
   if (m_debug_topics) {
-    publishDebugTopics(m_last_stiffness_torque, m_last_damping_torque, tau_tot,
-                       m_efforts);
+    publishDebugTopics(m_last_stiffness_torque, m_last_damping_torque,
+                       tau_vel_limit, tau_tot, m_efforts);
   }
 
   return controller_interface::return_type::OK;
@@ -502,7 +507,8 @@ void CombinedImpedanceController::updateNextTrajectoryPoint(
 
 void CombinedImpedanceController::publishDebugTopics(
     const ctrl::VectorND &tau_stiffness, const ctrl::VectorND &tau_damping,
-    const ctrl::VectorND &tau_total, const ctrl::VectorND &tau_commanded) {
+    const ctrl::VectorND &tau_velocity_limit, const ctrl::VectorND &tau_total,
+    const ctrl::VectorND &tau_commanded) {
   // Cartesian-mode debug (target/current/next_goal poses + angle)
   if (m_debug_cart_valid) {
     const auto stamp = get_node()->now();
@@ -533,16 +539,22 @@ void CombinedImpedanceController::publishDebugTopics(
                         tau_damping.data() + tau_damping.size());
     m_tau_damping_pub->publish(tau_msg);
   }
+  if (m_tau_velocity_limit_pub) {
+    std_msgs::msg::Float64MultiArray tau_msg;
+    tau_msg.data.assign(tau_velocity_limit.data(),
+                        tau_velocity_limit.data() + tau_velocity_limit.size());
+    m_tau_velocity_limit_pub->publish(tau_msg);
+  }
   if (m_tau_total_pub) {
     std_msgs::msg::Float64MultiArray tau_msg;
     tau_msg.data.assign(tau_total.data(), tau_total.data() + tau_total.size());
     m_tau_total_pub->publish(tau_msg);
   }
-  if (m_tau_damping_pub) {
+  if (m_tau_commanded_pub) {
     std_msgs::msg::Float64MultiArray tau_msg;
     tau_msg.data.assign(tau_commanded.data(),
                         tau_commanded.data() + tau_commanded.size());
-    m_tau_damping_pub->publish(tau_msg);
+    m_tau_commanded_pub->publish(tau_msg);
   }
 
   if (m_control_mode_pub) {
@@ -712,9 +724,10 @@ ctrl::VectorND CombinedImpedanceController::computeCartesianTaskTorque(
   return stiffness_torque + damping_torque; // + integral_torque;
 }
 
-void CombinedImpedanceController::applyJointVelocityLimits(
-    ctrl::VectorND &tau) {
+ctrl::VectorND
+CombinedImpedanceController::applyJointVelocityLimits(ctrl::VectorND &tau) {
   constexpr double kBufferRatio = 0.2;
+  ctrl::VectorND tau_vel_limit = ctrl::VectorND::Zero(tau.size());
 
   for (Eigen::Index i = 0; i < tau.size(); ++i) {
     const double limit = m_joint_velocity_limits(i);
@@ -725,6 +738,7 @@ void CombinedImpedanceController::applyJointVelocityLimits(
     const double vel = Base::m_joint_velocities(i);
     const double abs_vel = std::abs(vel);
     const double buffer_start = (1.0 - kBufferRatio) * limit;
+    const double tau_before = tau(i);
 
     if (abs_vel > limit) {
       // Hard clamp: joint exceeded the limit — override with braking torque
@@ -742,7 +756,11 @@ void CombinedImpedanceController::applyJointVelocityLimits(
       tau(i) -=
           alpha * m_velocity_limit_damping * sign * (abs_vel - buffer_start);
     }
+
+    tau_vel_limit(i) = tau(i) - tau_before;
   }
+
+  return tau_vel_limit;
 }
 
 ctrl::VectorND CombinedImpedanceController::computeTorque(double dt) {

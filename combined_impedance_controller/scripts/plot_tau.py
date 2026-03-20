@@ -25,6 +25,7 @@ class TauRecorder(Node):
         tau_damping_topic: str,
         tau_total_topic: str,
         tau_commanded_topic: str,
+        tau_velocity_limit_topic: str,
         mode_topic: str,
         target_frame_topic: str,
         current_frame_topic: str,
