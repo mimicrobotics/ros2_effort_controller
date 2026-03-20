@@ -20,6 +20,8 @@ class TauRecorder(Node):
         self,
         tau_topic: str,
         tau_damping_topic: str,
+        tau_total_topic: str,
+        tau_commanded_topic: str,
         mode_topic: str,
         target_frame_topic: str,
         current_frame_topic: str,
@@ -29,6 +31,10 @@ class TauRecorder(Node):
         self.samples: list[list[float]] = []
         self.damping_timestamps: list[float] = []
         self.damping_samples: list[list[float]] = []
+        self.total_timestamps: list[float] = []
+        self.total_samples: list[list[float]] = []
+        self.commanded_timestamps: list[float] = []
+        self.commanded_samples: list[list[float]] = []
         self.mode_timestamps: list[float] = []
         self.mode_values: list[int] = []
         self.target_timestamps: list[float] = []
@@ -41,11 +47,17 @@ class TauRecorder(Node):
         self.create_subscription(
             Float64MultiArray, tau_damping_topic, self._tau_damping_cb, 10
         )
+        self.create_subscription(
+            Float64MultiArray, tau_total_topic, self._tau_total_cb, 10
+        )
+        self.create_subscription(
+            Float64MultiArray, tau_commanded_topic, self._tau_commanded_cb, 10
+        )
         self.create_subscription(Int32, mode_topic, self._mode_cb, 10)
         self.create_subscription(PoseStamped, target_frame_topic, self._target_cb, 10)
         self.create_subscription(PoseStamped, current_frame_topic, self._current_cb, 10)
         self.get_logger().info(
-            f"Subscribing to {tau_topic}, {tau_damping_topic}, {mode_topic}, {target_frame_topic}, and {current_frame_topic} — press Ctrl+C to stop and plot"
+            f"Subscribing to {tau_topic}, {tau_damping_topic}, {tau_total_topic}, {tau_commanded_topic}, {mode_topic}, {target_frame_topic}, and {current_frame_topic} — press Ctrl+C to stop and plot"
         )
 
     def _stamp(self) -> float:
@@ -61,6 +73,14 @@ class TauRecorder(Node):
     def _tau_damping_cb(self, msg: Float64MultiArray):
         self.damping_timestamps.append(self._stamp())
         self.damping_samples.append(list(msg.data))
+
+    def _tau_total_cb(self, msg: Float64MultiArray):
+        self.total_timestamps.append(self._stamp())
+        self.total_samples.append(list(msg.data))
+
+    def _tau_commanded_cb(self, msg: Float64MultiArray):
+        self.commanded_timestamps.append(self._stamp())
+        self.commanded_samples.append(list(msg.data))
 
     def _mode_cb(self, msg: Int32):
         self.mode_timestamps.append(self._stamp())
@@ -90,6 +110,16 @@ def main():
         help="Tau damping topic (default: /combined_impedance_controller_right/debug_tau_damping)",
     )
     parser.add_argument(
+        "--total-topic",
+        default="/combined_impedance_controller_right/debug_tau_total",
+        help="Tau total topic (default: /combined_impedance_controller_right/debug_tau_total)",
+    )
+    parser.add_argument(
+        "--commanded-topic",
+        default="/combined_impedance_controller_right/debug_tau_commanded",
+        help="Tau commanded topic (default: /combined_impedance_controller_right/debug_tau_commanded)",
+    )
+    parser.add_argument(
         "--mode-topic",
         default="/combined_impedance_controller_right/debug_control_mode",
         help="Control mode topic (default: /combined_impedance_controller_right/debug_control_mode)",
@@ -110,6 +140,8 @@ def main():
     node = TauRecorder(
         args.topic,
         args.damping_topic,
+        args.total_topic,
+        args.commanded_topic,
         args.mode_topic,
         args.target_frame_topic,
         args.current_frame_topic,
@@ -139,85 +171,52 @@ def main():
             transition_labels.append(CONTROL_MODE_NAMES.get(v, f"MODE_{v}"))
 
     has_damping = bool(node.damping_samples)
-    n_subplots = 2 if has_damping else 1
-    fig, axes = plt.subplots(n_subplots, 1, sharex=True, squeeze=False)
-    ax = axes[0, 0]
+    n_joints = len(node.samples[0])
+    fig, axes = plt.subplots(
+        n_joints, 1, sharex=True, squeeze=False, figsize=(10, 3 * n_joints)
+    )
 
-    n_axes = len(node.samples[0])
-    for i in range(n_axes):
-        ax.plot(node.timestamps, [s[i] for s in node.samples], label=f"joint {i}")
-
-    for t, label in zip(transition_times, transition_labels):
-        ax.axvline(t, color="k", linestyle="--", alpha=0.6, label=label)
-
-    ax.set_ylabel("Tau [Nm]")
-    ax.set_title("Joint torques over time")
-    ax.grid(True)
-
-    # Overlay target and current frame positions on secondary y-axis
-    if node.target_xyz or node.current_xyz:
-        ax2 = ax.twinx()
-        coord_labels = ["x", "y", "z"]
-        coord_styles = ["--", "-.", ":"]
-        if node.target_xyz:
-            for i, (lbl, ls) in enumerate(zip(coord_labels, coord_styles)):
-                ax2.plot(
-                    node.target_timestamps,
-                    [s[i] for s in node.target_xyz],
-                    linestyle=ls,
-                    linewidth=1.5,
-                    alpha=0.8,
-                    label=f"target {lbl}",
-                )
-        if node.current_xyz:
-            for i, (lbl, ls) in enumerate(zip(coord_labels, coord_styles)):
-                ax2.plot(
-                    node.current_timestamps,
-                    [s[i] for s in node.current_xyz],
-                    linestyle=ls,
-                    linewidth=1.5,
-                    alpha=0.5,
-                    label=f"current {lbl}",
-                )
-        ax2.set_ylabel("Position [m]")
-        ax2.legend(loc="upper left")
-
-    # De-duplicate legend entries for primary axis
-    handles, labels = ax.get_legend_handles_labels()
-    seen = set()
-    unique = [
-        (handle, label)
-        for handle, label in zip(handles, labels)
-        if label not in seen and not seen.add(label)
-    ]
-    ax.legend(*zip(*unique), loc="upper right")
-
-    # Plot damping tau on second subplot
-    if has_damping:
-        ax_d = axes[1, 0]
-        n_damping_axes = len(node.damping_samples[0])
-        for i in range(n_damping_axes):
-            ax_d.plot(
+    for j in range(n_joints):
+        ax = axes[j, 0]
+        ax.plot(
+            node.timestamps,
+            [s[j] for s in node.samples],
+            label="tau stiffness",
+        )
+        if has_damping:
+            ax.plot(
                 node.damping_timestamps,
-                [s[i] for s in node.damping_samples],
-                label=f"joint {i}",
+                [s[j] for s in node.damping_samples],
+                label="tau damping",
+            )
+        if node.total_samples:
+            ax.plot(
+                node.total_timestamps,
+                [s[j] for s in node.total_samples],
+                label="tau total",
+            )
+        if node.commanded_samples:
+            ax.plot(
+                node.commanded_timestamps,
+                [s[j] for s in node.commanded_samples],
+                label="tau commanded",
             )
         for t, label in zip(transition_times, transition_labels):
-            ax_d.axvline(t, color="k", linestyle="--", alpha=0.6, label=label)
-        ax_d.set_xlabel("Time [s]")
-        ax_d.set_ylabel("Tau damping [Nm]")
-        ax_d.set_title("Joint damping torques over time")
-        ax_d.grid(True)
-        handles_d, labels_d = ax_d.get_legend_handles_labels()
-        seen_d = set()
-        unique_d = [
-            (h, l)
-            for h, l in zip(handles_d, labels_d)
-            if l not in seen_d and not seen_d.add(l)
+            ax.axvline(t, color="k", linestyle="--", alpha=0.6, label=label)
+
+        ax.set_ylabel("Tau [Nm]")
+        ax.set_title(f"Joint {j}")
+        ax.grid(True)
+
+        # De-duplicate legend entries
+        handles, labels = ax.get_legend_handles_labels()
+        seen = set()
+        unique = [
+            (h, l) for h, l in zip(handles, labels) if l not in seen and not seen.add(l)
         ]
-        ax_d.legend(*zip(*unique_d), loc="upper right")
-    else:
-        ax.set_xlabel("Time [s]")
+        ax.legend(*zip(*unique), loc="upper right")
+
+    axes[-1, 0].set_xlabel("Time [s]")
 
     plt.tight_layout()
     plt.show()
