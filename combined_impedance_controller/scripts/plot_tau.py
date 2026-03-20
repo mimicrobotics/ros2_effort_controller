@@ -10,7 +10,7 @@ import math
 
 import matplotlib
 
-matplotlib.use("Agg")
+matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import rclpy
 from rclpy.node import Node
@@ -133,48 +133,6 @@ class TauRecorder(Node):
         self.current_xyz.append([p.x, p.y, p.z])
         self.current_rpy.append(self._quat_to_euler(o))
 
-
-def _show_scrollable(figs: list[tuple[plt.Figure, str]]):
-    """Display matplotlib figures in Tk windows with vertical scrollbars.
-
-    *figs* is a list of (figure, title) tuples.  Each gets its own window;
-    they all share a single Tk mainloop.
-    """
-    import tkinter as tk
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
-    root = tk.Tk()
-    root.withdraw()  # hide the empty root window
-
-    for fig, title in figs:
-        win = tk.Toplevel(root)
-        win.title(title)
-
-        screen_h = win.winfo_screenheight()
-        win_h = min(int(screen_h * 0.85), 900)
-        win_w = 1200
-        win.geometry(f"{win_w}x{win_h}")
-
-        canvas = tk.Canvas(win)
-        scrollbar = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-
-        frame = tk.Frame(canvas)
-        canvas.create_window((0, 0), window=frame, anchor="nw")
-
-        fig_canvas = FigureCanvasTkAgg(fig, master=frame)
-        fig_canvas.draw()
-        fig_canvas.get_tk_widget().pack()
-
-        frame.update_idletasks()
-        canvas.configure(scrollregion=canvas.bbox("all"))
-
-        canvas.bind_all("<Button-4>", lambda e, c=canvas: c.yview_scroll(-3, "units"))
-        canvas.bind_all("<Button-5>", lambda e, c=canvas: c.yview_scroll(3, "units"))
-
-    root.mainloop()
 
 
 def main():
@@ -379,7 +337,7 @@ def main():
     fig.tight_layout()
 
     # --- Second figure: Target vs Current frame (one plot per dimension) ---
-    figures: list[tuple[plt.Figure, str]] = [(fig, "Tau Plot")]
+    fig.canvas.manager.set_window_title("Tau Plot")
 
     has_frame = bool(node.target_xyz) or bool(node.current_xyz)
     if has_frame:
@@ -433,9 +391,9 @@ def main():
             ax.legend(*zip(*unique), loc="upper right")
         axes2[-1, 0].set_xlabel("Time [s]")
         fig2.tight_layout()
-        figures.append((fig2, "Frame Plot"))
+        fig2.canvas.manager.set_window_title("Frame Plot")
 
-    _show_scrollable(figures)
+    plt.show()
 
 
 if __name__ == "__main__":
