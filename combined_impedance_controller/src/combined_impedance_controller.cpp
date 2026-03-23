@@ -49,6 +49,16 @@ CombinedImpedanceController::on_init() {
   auto_declare<std::vector<double>>("joint_integral_gain",
                                     std::vector<double>());
 
+  // Integral conditional-activation thresholds: the integral term only
+  // accumulates when the Cartesian error is below these values, keeping it
+  // inactive during large transient motions.
+  auto_declare<double>("integral_activation_threshold_lin", 0.02); // meters
+  auto_declare<double>("integral_activation_threshold_rot", 0.05); // radians
+  // Goal-change thresholds: the integral is reset when a new target differs
+  // from the previous one by more than these values.
+  auto_declare<double>("integral_goal_change_threshold_lin", 0.01); // meters
+  auto_declare<double>("integral_goal_change_threshold_rot", 0.03); // radians
+
   // Define upper limit for impedance forces
   auto_declare<double>("max_impedance_force", 70.0);
 
@@ -199,6 +209,32 @@ CombinedImpedanceController::on_configure(
   m_compensate_dJdq = get_node()->get_parameter("compensate_dJdq").as_bool();
   RCLCPP_INFO(get_node()->get_logger(), "Compensate dJdq: %d",
               m_compensate_dJdq);
+
+  // Integral activation and goal-change thresholds
+  m_integral_activation_threshold_lin =
+      get_node()
+          ->get_parameter("integral_activation_threshold_lin")
+          .as_double();
+  m_integral_activation_threshold_rot =
+      get_node()
+          ->get_parameter("integral_activation_threshold_rot")
+          .as_double();
+  m_integral_goal_change_threshold_lin =
+      get_node()
+          ->get_parameter("integral_goal_change_threshold_lin")
+          .as_double();
+  m_integral_goal_change_threshold_rot =
+      get_node()
+          ->get_parameter("integral_goal_change_threshold_rot")
+          .as_double();
+  RCLCPP_INFO(get_node()->get_logger(),
+              "Integral activation thresholds: lin=%.4f m, rot=%.4f rad",
+              m_integral_activation_threshold_lin,
+              m_integral_activation_threshold_rot);
+  RCLCPP_INFO(get_node()->get_logger(),
+              "Integral goal-change thresholds: lin=%.4f m, rot=%.4f rad",
+              m_integral_goal_change_threshold_lin,
+              m_integral_goal_change_threshold_rot);
   // Set nullspace damping
   m_null_space_damping = 2 * sqrt(m_null_space_stiffness);
 
@@ -686,7 +722,8 @@ ctrl::VectorND CombinedImpedanceController::computeJointTrajectoryTaskTorque(
 
 ctrl::VectorND CombinedImpedanceController::computeCartesianTaskTorque(
     const ctrl::MatrixND &jac, const ctrl::VectorND &q_dot,
-    const ctrl::Matrix6D &Lambda, const KDL::Frame &target_frame_snapshot) {
+    const ctrl::Matrix6D &Lambda, const KDL::Frame &target_frame_snapshot,
+    double dt) {
   // Compute the motion error
   const ctrl::Vector6D motion_error =
       computeCartMotionError(target_frame_snapshot);
@@ -696,20 +733,26 @@ ctrl::VectorND CombinedImpedanceController::computeCartesianTaskTorque(
       Base::displayInBaseLink(m_cartesian_stiffness, Base::m_end_effector_link);
 
   const ctrl::Matrix6D K_d = base_link_stiffness;
-  // Eigen::VectorXd damping_correction = 3.0 * Eigen::VectorXd::Ones(6);
   const ctrl::Matrix6D D_d =
       compute_correct_damping(Lambda, K_d, m_damping_ratio);
   const ctrl::Matrix6D K_i = m_cartesian_integral_gain;
 
-  // Anti-windup: clamp the integral error to prevent excessive torques
-  m_cart_motion_error_integral.head(3)
-      << (m_cart_motion_error_integral.head(3) + 0.1 * motion_error.head(3))
-             .cwiseMax(-0.1)
-             .cwiseMin(0.1);
-  m_cart_motion_error_integral.tail(3)
-      << (m_cart_motion_error_integral.tail(3) + 0.1 * motion_error.tail(3))
-             .cwiseMax(-0.05)
-             .cwiseMin(0.05);
+  // Conditional integration: only accumulate when close to the target so that
+  // the integral term does not interfere with transient/dynamic behaviour.
+  const double lin_error_norm = motion_error.head(3).norm();
+  const double rot_error_norm = motion_error.tail(3).norm();
+  if (lin_error_norm < m_integral_activation_threshold_lin &&
+      rot_error_norm < m_integral_activation_threshold_rot) {
+    // Anti-windup: integrate with dt and clamp to prevent excessive torques
+    m_cart_motion_error_integral.head(3)
+        << (m_cart_motion_error_integral.head(3) + dt * motion_error.head(3))
+               .cwiseMax(-0.1)
+               .cwiseMin(0.1);
+    m_cart_motion_error_integral.tail(3)
+        << (m_cart_motion_error_integral.tail(3) + dt * motion_error.tail(3))
+               .cwiseMax(-0.05)
+               .cwiseMin(0.05);
+  }
 
   const ctrl::Vector6D stiffness_torque =
       jac.transpose() * (K_d * motion_error);
@@ -721,7 +764,7 @@ ctrl::VectorND CombinedImpedanceController::computeCartesianTaskTorque(
   m_last_stiffness_torque = stiffness_torque;
   m_last_damping_torque = damping_torque;
 
-  return stiffness_torque + damping_torque; // + integral_torque;
+  return stiffness_torque + damping_torque + integral_torque;
 }
 
 ctrl::VectorND
@@ -872,8 +915,8 @@ ctrl::VectorND CombinedImpedanceController::computeTorque(double dt) {
         }
       }
     } else if (m_control_mode.load() == ControlMode::CARTESIAN) {
-      const auto tau_task =
-          computeCartesianTaskTorque(jac, q_dot, Lambda, target_frame_snapshot);
+      const auto tau_task = computeCartesianTaskTorque(
+          jac, q_dot, Lambda, target_frame_snapshot, dt);
       // Save the last task torque for blending
       m_last_tau_task = tau_task;
       tau += tau_task;
@@ -994,6 +1037,21 @@ void CombinedImpedanceController::targetFrameCallback(
                      target->pose.orientation.z, target->pose.orientation.w),
                  KDL::Vector(target->pose.position.x, target->pose.position.y,
                              target->pose.position.z));
+
+  // Reset integral when the goal changes significantly to avoid torque bias
+  // from the previous target causing overshoot toward the new one.
+  const KDL::Vector dp = frame.p - m_prev_target_frame.p;
+  const double lin_change = dp.Norm();
+  // Rotation change as angle of the relative rotation
+  const KDL::Rotation dR = m_prev_target_frame.M.Inverse() * frame.M;
+  const KDL::Vector rot_axis = dR.GetRot(); // axis * angle (Rodrigues)
+  const double rot_change = rot_axis.Norm();
+  if (lin_change > m_integral_goal_change_threshold_lin ||
+      rot_change > m_integral_goal_change_threshold_rot) {
+    m_cart_motion_error_integral = ctrl::Vector6D::Zero();
+  }
+  m_prev_target_frame = frame;
+
   std::lock_guard<std::mutex> lock(m_input_mutex);
   m_target_frame = frame;
 }

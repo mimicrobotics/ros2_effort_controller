@@ -90,7 +90,8 @@ private:
   ctrl::VectorND computeJointTrajectoryTaskTorque(const ctrl::VectorND &q_dot);
   ctrl::VectorND computeCartesianTaskTorque(
       const ctrl::MatrixND &jac, const ctrl::VectorND &q_dot,
-      const ctrl::Matrix6D &Lambda, const KDL::Frame &target_frame_snapshot);
+      const ctrl::Matrix6D &Lambda, const KDL::Frame &target_frame_snapshot,
+      double dt);
   void publishDebugTopics(const ctrl::VectorND &tau_stiffness,
                           const ctrl::VectorND &tau_damping,
                           const ctrl::VectorND &tau_velocity_limit,
@@ -182,6 +183,12 @@ private:
   KDL::Frame m_current_frame;
   ctrl::VectorND m_q_ns; // Null space configuration
   ctrl::Vector6D m_cart_motion_error_integral;
+  KDL::Frame
+      m_prev_target_frame; ///< Previous target for goal-change detection.
+  double m_integral_activation_threshold_lin{0.02};  ///< meters
+  double m_integral_activation_threshold_rot{0.05};  ///< radians
+  double m_integral_goal_change_threshold_lin{0.01}; ///< meters
+  double m_integral_goal_change_threshold_rot{0.03}; ///< radians
 
   // Member variables for joint impedance control
   ctrl::VectorND m_desired_joint_positions{};
