@@ -138,7 +138,7 @@ CombinedImpedanceController::on_configure(
   m_joint_damping = ctrl::MatrixND::Zero(m_joint_number, m_joint_number);
   for (size_t i = 0; i < Base::m_joint_number; ++i) {
     m_joint_stiffness(i, i) = joint_stiffness[i];
-    m_joint_damping(i, i) = 2.0 * std::sqrt(joint_stiffness[i]);
+    m_joint_damping(i, i) = 1.5 * std::sqrt(joint_stiffness[i]);
   }
   RCLCPP_INFO_STREAM(get_node()->get_logger(),
                      "Joint stiffness: " << m_joint_stiffness.transpose());
