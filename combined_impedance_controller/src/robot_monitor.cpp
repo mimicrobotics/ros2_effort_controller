@@ -3,8 +3,8 @@
 namespace combined_impedance_controller {
 
 RobotMonitor::RobotMonitor(rclcpp_lifecycle::LifecycleNode::SharedPtr node)
-    : node_(std::move(node)), controller_state_(ControllerState::RUNNING),
-      mimic_robot_mode_(MimicRobotMode::MOVE) {}
+    : node_(std::move(node)), controller_state_(ControllerState::STOPPED),
+      mimic_robot_mode_(MimicRobotMode::IDLE) {}
 
 void RobotMonitor::configure(const std::string &controller_name) {
   // Collision-detection heartbeat subscriber

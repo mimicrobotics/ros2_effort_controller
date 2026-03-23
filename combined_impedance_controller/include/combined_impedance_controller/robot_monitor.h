@@ -76,7 +76,7 @@ private:
   bool updateControllerState();
 
   // Collision heartbeat state
-  std::atomic<bool> is_safe_{true};
+  std::atomic<bool> is_safe_{false};
   rclcpp::Time last_heartbeat_time_;
   std::mutex heartbeat_mutex_;
   std::atomic<bool> initial_heartbeat_received_{false};
