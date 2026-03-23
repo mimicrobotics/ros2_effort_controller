@@ -6,6 +6,7 @@
 
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <ur_dashboard_msgs/srv/get_loaded_program.hpp>
 #include <ur_dashboard_msgs/srv/load.hpp>
 
 #include "combined_impedance_controller/robot_monitor.h"
@@ -77,6 +78,7 @@ private:
 
   void tryRestartExternalProgram();
   void tryRecoverFromStop();
+  void validateRunningProgram();
 
   // Async Trigger helper: fires an async call and transitions recovery_state_
   // to next_state on success, or resets to IDLE on failure.
@@ -120,6 +122,19 @@ private:
   static constexpr double kProgramRestartCooldown{3.0};
   std::string ur_program_name_;
   std::string dashboard_prefix_;
+
+  // Running program validation
+  enum class ProgramValidationState {
+    IDLE,
+    CHECKING,
+    STOPPING,
+  };
+  ProgramValidationState program_validation_state_{
+      ProgramValidationState::IDLE};
+  bool program_validated_{false};
+  rclcpp::Client<ur_dashboard_msgs::srv::GetLoadedProgram>::SharedPtr
+      get_loaded_program_client_;
+  TriggerClient::SharedPtr stop_program_client_;
 };
 
 } // namespace combined_impedance_controller

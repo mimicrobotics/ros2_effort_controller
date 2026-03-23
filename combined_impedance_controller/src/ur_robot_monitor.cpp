@@ -12,6 +12,11 @@ void UrRobotMonitor::onConfigure() {
       dashboard_prefix_ + "/load_program");
   play_client_ =
       node_->create_client<std_srvs::srv::Trigger>(dashboard_prefix_ + "/play");
+  stop_program_client_ =
+      node_->create_client<std_srvs::srv::Trigger>(dashboard_prefix_ + "/stop");
+  get_loaded_program_client_ =
+      node_->create_client<ur_dashboard_msgs::srv::GetLoadedProgram>(
+          dashboard_prefix_ + "/get_loaded_program");
   last_program_restart_attempt_ = node_->get_clock()->now();
   last_recovery_attempt_ = node_->get_clock()->now();
 
@@ -46,6 +51,7 @@ void UrRobotMonitor::updateState(const std::vector<double> &state_values) {
   const auto program_mode_new = static_cast<ProgramMode>(state_values[2]);
   if (program_mode_new != program_mode_) {
     program_mode_ = program_mode_new;
+    program_validated_ = false;
     RCLCPP_INFO(node_->get_logger(), "Program mode switched to: %s",
                 toString(program_mode_));
   }
@@ -54,11 +60,12 @@ void UrRobotMonitor::updateState(const std::vector<double> &state_values) {
 bool UrRobotMonitor::isReady() const {
   return robot_mode_ == RobotMode::RUNNING &&
          safety_mode_ == SafetyMode::NORMAL &&
-         program_mode_ == ProgramMode::PLAYING;
+         program_mode_ == ProgramMode::PLAYING && program_validated_;
 }
 
 void UrRobotMonitor::onRecoveryTick() {
   tryRecoverFromStop();
+  validateRunningProgram();
   tryRestartExternalProgram();
 }
 
@@ -273,15 +280,104 @@ void UrRobotMonitor::tryRecoverFromStop() {
   }
 }
 
+void UrRobotMonitor::validateRunningProgram() {
+  // Only validate when program is PLAYING and hasn't been validated yet
+  if (program_mode_ != ProgramMode::PLAYING || program_validated_) {
+    if (program_mode_ != ProgramMode::PLAYING) {
+      program_validation_state_ = ProgramValidationState::IDLE;
+    }
+    return;
+  }
+
+  switch (program_validation_state_) {
+  case ProgramValidationState::IDLE: {
+    if (!get_loaded_program_client_->service_is_ready()) {
+      RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                           "get_loaded_program service not available, "
+                           "waiting...");
+      return;
+    }
+    RCLCPP_INFO(node_->get_logger(),
+                "Program is PLAYING, verifying loaded program...");
+    auto request =
+        std::make_shared<ur_dashboard_msgs::srv::GetLoadedProgram::Request>();
+    get_loaded_program_client_->async_send_request(
+        request,
+        [this](rclcpp::Client<
+               ur_dashboard_msgs::srv::GetLoadedProgram>::SharedFuture future) {
+          auto result = future.get();
+          if (!result->success) {
+            RCLCPP_WARN(node_->get_logger(), "Failed to get loaded program: %s",
+                        result->answer.c_str());
+            program_validation_state_ = ProgramValidationState::IDLE;
+            return;
+          }
+          const auto &loaded = result->program_name;
+          if (loaded == ur_program_name_) {
+            RCLCPP_INFO(node_->get_logger(), "Correct program is running: %s",
+                        loaded.c_str());
+            program_validated_ = true;
+            program_validation_state_ = ProgramValidationState::IDLE;
+          } else {
+            RCLCPP_WARN(node_->get_logger(),
+                        "Wrong program running: '%s' (expected '%s'). "
+                        "Stopping...",
+                        loaded.c_str(), ur_program_name_.c_str());
+            program_validation_state_ = ProgramValidationState::STOPPING;
+          }
+        });
+    program_validation_state_ = ProgramValidationState::CHECKING;
+    break;
+  }
+  case ProgramValidationState::CHECKING:
+    // Waiting for GetLoadedProgram callback
+    break;
+  case ProgramValidationState::STOPPING: {
+    if (!stop_program_client_->service_is_ready()) {
+      RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                           "stop service not available, waiting...");
+      return;
+    }
+    RCLCPP_INFO(node_->get_logger(), "Stopping wrong program...");
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    stop_program_client_->async_send_request(
+        request,
+        [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+          auto result = future.get();
+          if (result->success) {
+            RCLCPP_INFO(node_->get_logger(),
+                        "Wrong program stopped. Will reload %s.",
+                        ur_program_name_.c_str());
+          } else {
+            RCLCPP_WARN(node_->get_logger(), "Failed to stop wrong program: %s",
+                        result->message.c_str());
+          }
+          // Either way, go back to IDLE so tryRestartExternalProgram can
+          // load+play the correct program once program_mode_ becomes STOPPED
+          program_validation_state_ = ProgramValidationState::IDLE;
+        });
+    // Move to CHECKING to wait for callback (reusing as "in-flight" state)
+    program_validation_state_ = ProgramValidationState::CHECKING;
+    break;
+  }
+  }
+}
+
 void UrRobotMonitor::tryRestartExternalProgram() {
   const auto now = node_->get_clock()->now();
 
-  // Reset state machine when program is playing again
-  if (program_mode_ == ProgramMode::PLAYING) {
+  // Reset state machine when the correct program is playing again
+  if (program_mode_ == ProgramMode::PLAYING && program_validated_) {
     if (program_restart_state_ != ProgramRestartState::IDLE) {
       RCLCPP_INFO(node_->get_logger(), "External program is playing again.");
     }
     program_restart_state_ = ProgramRestartState::IDLE;
+    return;
+  }
+
+  // While validation is in progress (checking or stopping wrong program),
+  // don't attempt a restart
+  if (program_validation_state_ != ProgramValidationState::IDLE) {
     return;
   }
 
