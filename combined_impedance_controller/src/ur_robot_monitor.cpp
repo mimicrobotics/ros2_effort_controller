@@ -17,8 +17,12 @@ void UrRobotMonitor::onConfigure() {
   get_loaded_program_client_ =
       node_->create_client<ur_dashboard_msgs::srv::GetLoadedProgram>(
           dashboard_prefix_ + "/get_loaded_program");
+  is_in_remote_control_client_ =
+      node_->create_client<ur_dashboard_msgs::srv::IsInRemoteControl>(
+          dashboard_prefix_ + "/is_in_remote_control");
   last_program_restart_attempt_ = node_->get_clock()->now();
   last_recovery_attempt_ = node_->get_clock()->now();
+  last_remote_control_poll_ = node_->get_clock()->now();
 
   // Recovery service clients
   close_safety_popup_client_ = node_->create_client<std_srvs::srv::Trigger>(
@@ -58,12 +62,16 @@ void UrRobotMonitor::updateState(const std::vector<double> &state_values) {
 }
 
 bool UrRobotMonitor::isReady() const {
-  return robot_mode_ == RobotMode::RUNNING &&
+  return is_in_remote_control_ && robot_mode_ == RobotMode::RUNNING &&
          safety_mode_ == SafetyMode::NORMAL &&
          program_mode_ == ProgramMode::PLAYING && program_validated_;
 }
 
 void UrRobotMonitor::onRecoveryTick() {
+  pollRemoteControlMode();
+  if (!is_in_remote_control_) {
+    return;
+  }
   tryRecoverFromStop();
   validateRunningProgram();
   tryRestartExternalProgram();
@@ -102,6 +110,54 @@ void UrRobotMonitor::asyncTrigger(TriggerClient::SharedPtr &client,
       last_recovery_attempt_ = node_->get_clock()->now();
     }
   });
+}
+
+void UrRobotMonitor::pollRemoteControlMode() {
+  if (remote_control_query_in_flight_) {
+    return;
+  }
+
+  const auto now = node_->get_clock()->now();
+  if ((now - last_remote_control_poll_).seconds() <
+      kRemoteControlPollInterval) {
+    return;
+  }
+
+  if (!is_in_remote_control_client_->service_is_ready()) {
+    RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                         "is_in_remote_control service not available, "
+                         "waiting...");
+    return;
+  }
+
+  remote_control_query_in_flight_ = true;
+  last_remote_control_poll_ = now;
+  auto request =
+      std::make_shared<ur_dashboard_msgs::srv::IsInRemoteControl::Request>();
+  is_in_remote_control_client_->async_send_request(
+      request,
+      [this](rclcpp::Client<
+             ur_dashboard_msgs::srv::IsInRemoteControl>::SharedFuture future) {
+        auto result = future.get();
+        remote_control_query_in_flight_ = false;
+        if (!result->success) {
+          RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                               "Failed to query remote control mode: %s",
+                               result->answer.c_str());
+          return;
+        }
+        if (result->remote_control != is_in_remote_control_) {
+          is_in_remote_control_ = result->remote_control;
+          if (is_in_remote_control_) {
+            RCLCPP_INFO(node_->get_logger(),
+                        "Robot is now in remote control mode.");
+          } else {
+            RCLCPP_WARN(node_->get_logger(),
+                        "Robot is no longer in remote control mode. "
+                        "Refusing to send commands.");
+          }
+        }
+      });
 }
 
 void UrRobotMonitor::tryRecoverFromStop() {

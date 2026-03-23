@@ -7,6 +7,7 @@
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <ur_dashboard_msgs/srv/get_loaded_program.hpp>
+#include <ur_dashboard_msgs/srv/is_in_remote_control.hpp>
 #include <ur_dashboard_msgs/srv/load.hpp>
 
 #include "combined_impedance_controller/robot_monitor.h"
@@ -75,10 +76,12 @@ private:
   RobotMode robot_mode_{RobotMode::DISCONNECTED};
   SafetyMode safety_mode_{SafetyMode::UNDEFINED_SAFETY_MODE};
   ProgramMode program_mode_{ProgramMode::STOPPED};
+  bool is_in_remote_control_{false};
 
   void tryRestartExternalProgram();
   void tryRecoverFromStop();
   void validateRunningProgram();
+  void pollRemoteControlMode();
 
   // Async Trigger helper: fires an async call and transitions recovery_state_
   // to next_state on success, or resets to IDLE on failure.
@@ -135,6 +138,13 @@ private:
   rclcpp::Client<ur_dashboard_msgs::srv::GetLoadedProgram>::SharedPtr
       get_loaded_program_client_;
   TriggerClient::SharedPtr stop_program_client_;
+
+  // Remote control mode polling
+  rclcpp::Client<ur_dashboard_msgs::srv::IsInRemoteControl>::SharedPtr
+      is_in_remote_control_client_;
+  bool remote_control_query_in_flight_{false};
+  rclcpp::Time last_remote_control_poll_;
+  static constexpr double kRemoteControlPollInterval{2.0};
 };
 
 } // namespace combined_impedance_controller
