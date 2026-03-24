@@ -135,6 +135,7 @@ private:
   ProgramValidationState program_validation_state_{
       ProgramValidationState::IDLE};
   bool program_validated_{false};
+  bool force_program_restart_{false};
   rclcpp::Client<ur_dashboard_msgs::srv::GetLoadedProgram>::SharedPtr
       get_loaded_program_client_;
   TriggerClient::SharedPtr stop_program_client_;

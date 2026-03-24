@@ -166,6 +166,11 @@ void UrRobotMonitor::tryRecoverFromStop() {
     if (recovery_state_ != RecoveryState::IDLE) {
       RCLCPP_INFO(node_->get_logger(), "Recovery: safety mode is normal.");
       recovery_state_ = RecoveryState::IDLE;
+      // After recovery (e.g. from e-stop), the program may be paused but the
+      // program_running GPIO still reports 1.0 (PLAYING). Force a stop+restart
+      // cycle so the program actually gets unpaused.
+      program_validated_ = false;
+      force_program_restart_ = true;
     }
     return;
   }
@@ -423,7 +428,8 @@ void UrRobotMonitor::tryRestartExternalProgram() {
   const auto now = node_->get_clock()->now();
 
   // Reset state machine when the correct program is playing again
-  if (program_mode_ == ProgramMode::PLAYING && program_validated_) {
+  if (program_mode_ == ProgramMode::PLAYING && program_validated_ &&
+      !force_program_restart_) {
     if (program_restart_state_ != ProgramRestartState::IDLE) {
       RCLCPP_INFO(node_->get_logger(), "External program is playing again.");
     }
@@ -438,10 +444,47 @@ void UrRobotMonitor::tryRestartExternalProgram() {
   }
 
   // Only attempt restart when robot is RUNNING, safety is NORMAL, but program
-  // is STOPPED or PAUSED
+  // is STOPPED or PAUSED (or a forced restart is pending)
   if (robot_mode_ != RobotMode::RUNNING || safety_mode_ != SafetyMode::NORMAL ||
-      program_mode_ == ProgramMode::PLAYING) {
+      (program_mode_ == ProgramMode::PLAYING && !force_program_restart_)) {
     return;
+  }
+
+  // After recovery, the program_running GPIO may still report PLAYING even
+  // though the program is actually paused. Stop it first so it transitions
+  // to STOPPED, then the normal load+play path will restart it.
+  if (force_program_restart_ && program_mode_ == ProgramMode::PLAYING) {
+    if (program_restart_state_ == ProgramRestartState::IDLE) {
+      if (!stop_program_client_->service_is_ready()) {
+        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                             "stop service not available, waiting...");
+        return;
+      }
+      RCLCPP_INFO(node_->get_logger(),
+                  "Force-stopping program after recovery to ensure clean "
+                  "restart...");
+      auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+      stop_program_client_->async_send_request(
+          request,
+          [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+            auto result = future.get();
+            if (result->success) {
+              RCLCPP_INFO(node_->get_logger(),
+                          "Program stopped for clean restart.");
+            } else {
+              RCLCPP_WARN(node_->get_logger(),
+                          "Failed to stop program for restart: %s",
+                          result->message.c_str());
+            }
+            force_program_restart_ = false;
+            program_restart_state_ = ProgramRestartState::IDLE;
+            last_program_restart_attempt_ = node_->get_clock()->now();
+          });
+      program_restart_state_ =
+          ProgramRestartState::LOADING; // reuse as "in-flight"
+      return;
+    }
+    return; // waiting for stop callback
   }
 
   switch (program_restart_state_) {
