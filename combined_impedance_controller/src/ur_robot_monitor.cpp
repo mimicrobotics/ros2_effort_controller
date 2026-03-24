@@ -321,7 +321,7 @@ void UrRobotMonitor::tryRecoverFromStop() {
       RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
                            "Recovery next state: %s",
                            toString(recovery_next_state_));
-      asyncTrigger(power_on_client_, "brake_release");
+      asyncTrigger(brake_release_client_, "brake_release");
       break;
     default:
       RCLCPP_WARN(
