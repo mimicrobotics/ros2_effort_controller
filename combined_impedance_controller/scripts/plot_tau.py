@@ -144,33 +144,32 @@ class TauRecorder(Node):
         self.current_rpy.append(self._quat_to_euler(o))
 
 
-
 def main():
     parser = argparse.ArgumentParser(description="Record and plot tau from debug topic")
     parser.add_argument(
         "--topic",
-        default="/combined_impedance_controller_right/debug_tau_stiffness",
-        help="Tau topic (default: /combined_impedance_controller_right/debug_tau_stiffness)",
+        default="/combined_impedance_controller_left/debug_tau_stiffness",
+        help="Tau topic (default: /combined_impedance_controller_left/debug_tau_stiffness)",
     )
     parser.add_argument(
         "--damping-topic",
-        default="/combined_impedance_controller_right/debug_tau_damping",
-        help="Tau damping topic (default: /combined_impedance_controller_right/debug_tau_damping)",
+        default="/combined_impedance_controller_left/debug_tau_damping",
+        help="Tau damping topic (default: /combined_impedance_controller_left/debug_tau_damping)",
     )
     parser.add_argument(
         "--total-topic",
-        default="/combined_impedance_controller_right/debug_tau_total",
-        help="Tau total topic (default: /combined_impedance_controller_right/debug_tau_total)",
+        default="/combined_impedance_controller_left/debug_tau_total",
+        help="Tau total topic (default: /combined_impedance_controller_left/debug_tau_total)",
     )
     parser.add_argument(
         "--commanded-topic",
-        default="/combined_impedance_controller_right/debug_tau_commanded",
-        help="Tau commanded topic (default: /combined_impedance_controller_right/debug_tau_commanded)",
+        default="/combined_impedance_controller_left/debug_tau_commanded",
+        help="Tau commanded topic (default: /combined_impedance_controller_left/debug_tau_commanded)",
     )
     parser.add_argument(
         "--velocity-limit-topic",
-        default="/combined_impedance_controller_right/debug_tau_velocity_limit",
-        help="Tau velocity limit topic (default: /combined_impedance_controller_right/debug_tau_velocity_limit)",
+        default="/combined_impedance_controller_left/debug_tau_velocity_limit",
+        help="Tau velocity limit topic (default: /combined_impedance_controller_left/debug_tau_velocity_limit)",
     )
     parser.add_argument(
         "--integral-topic",
@@ -179,18 +178,18 @@ def main():
     )
     parser.add_argument(
         "--mode-topic",
-        default="/combined_impedance_controller_right/debug_control_mode",
-        help="Control mode topic (default: /combined_impedance_controller_right/debug_control_mode)",
+        default="/combined_impedance_controller_left/debug_control_mode",
+        help="Control mode topic (default: /combined_impedance_controller_left/debug_control_mode)",
     )
     parser.add_argument(
         "--target-frame-topic",
-        default="/combined_impedance_controller_right/target_frame",
-        help="Target frame topic (default: /combined_impedance_controller_right/target_frame)",
+        default="/combined_impedance_controller_left/target_frame",
+        help="Target frame topic (default: /combined_impedance_controller_left/target_frame)",
     )
     parser.add_argument(
         "--current-frame-topic",
-        default="/combined_impedance_controller_right/debug_current_frame",
-        help="Current frame topic (default: /combined_impedance_controller_right/debug_current_frame)",
+        default="/combined_impedance_controller_left/debug_current_frame",
+        help="Current frame topic (default: /combined_impedance_controller_left/debug_current_frame)",
     )
     args = parser.parse_args()
 
@@ -231,12 +230,8 @@ def main():
             transition_labels.append(CONTROL_MODE_NAMES.get(v, f"MODE_{v}"))
 
     has_damping = bool(node.damping_samples)
-    has_xyz = bool(node.target_xyz) or bool(node.current_xyz)
-    has_rpy = bool(node.target_rpy) or bool(node.current_rpy)
     n_joints = len(node.samples[0])
-    n_xyz = 3 if has_xyz else 0
-    n_rpy = 3 if has_rpy else 0
-    n_rows = n_joints + n_xyz + n_rpy
+    n_rows = n_joints
     fig, axes = plt.subplots(
         n_rows, 1, sharex=True, squeeze=False, figsize=(12, 3 * n_rows)
     )
@@ -292,68 +287,6 @@ def main():
             (h, l) for h, l in zip(handles, labels) if l not in seen and not seen.add(l)
         ]
         ax.legend(*zip(*unique), loc="upper right")
-
-    # Target vs Current XYZ plots
-    if has_xyz:
-        axis_names = ["X", "Y", "Z"]
-        for i, name in enumerate(axis_names):
-            ax = axes[n_joints + i, 0]
-            if node.target_xyz:
-                ax.plot(
-                    node.target_timestamps,
-                    [s[i] for s in node.target_xyz],
-                    label=f"target {name}",
-                )
-            if node.current_xyz:
-                ax.plot(
-                    node.current_timestamps,
-                    [s[i] for s in node.current_xyz],
-                    label=f"current {name}",
-                )
-            for t, label in zip(transition_times, transition_labels):
-                ax.axvline(t, color="k", linestyle="--", alpha=0.6, label=label)
-            ax.set_ylabel(f"{name} [m]")
-            ax.set_title(f"Target vs Current — {name}")
-            ax.grid(True)
-            handles, labels = ax.get_legend_handles_labels()
-            seen = set()
-            unique = [
-                (h, l)
-                for h, l in zip(handles, labels)
-                if l not in seen and not seen.add(l)
-            ]
-            ax.legend(*zip(*unique), loc="upper right")
-
-    # Target vs Current RPY (orientation) plots
-    if has_rpy:
-        rpy_names = ["Roll", "Pitch", "Yaw"]
-        for i, name in enumerate(rpy_names):
-            ax = axes[n_joints + n_xyz + i, 0]
-            if node.target_rpy:
-                ax.plot(
-                    node.target_timestamps,
-                    [s[i] for s in node.target_rpy],
-                    label=f"target {name}",
-                )
-            if node.current_rpy:
-                ax.plot(
-                    node.current_timestamps,
-                    [s[i] for s in node.current_rpy],
-                    label=f"current {name}",
-                )
-            for t, label in zip(transition_times, transition_labels):
-                ax.axvline(t, color="k", linestyle="--", alpha=0.6, label=label)
-            ax.set_ylabel(f"{name} [rad]")
-            ax.set_title(f"Target vs Current — {name}")
-            ax.grid(True)
-            handles, labels = ax.get_legend_handles_labels()
-            seen = set()
-            unique = [
-                (h, l)
-                for h, l in zip(handles, labels)
-                if l not in seen and not seen.add(l)
-            ]
-            ax.legend(*zip(*unique), loc="upper right")
 
     axes[-1, 0].set_xlabel("Time [s]")
     fig.tight_layout()
