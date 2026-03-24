@@ -94,6 +94,7 @@ private:
       double dt);
   void publishDebugTopics(const ctrl::VectorND &tau_stiffness,
                           const ctrl::VectorND &tau_damping,
+                          const ctrl::VectorND &tau_integral,
                           const ctrl::VectorND &tau_velocity_limit,
                           const ctrl::VectorND &tau_total,
                           const ctrl::VectorND &tau_commanded);
@@ -132,6 +133,8 @@ private:
       m_tau_commanded_pub;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
       m_tau_velocity_limit_pub;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
+      m_tau_integral_pub;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr m_control_mode_pub;
 
   // Debug state cached by computeCartMotionError for publishDebugTopics
@@ -216,6 +219,7 @@ private:
   bool m_debug_topics = false;
   ctrl::VectorND m_last_stiffness_torque;
   ctrl::VectorND m_last_damping_torque;
+  ctrl::VectorND m_last_integral_torque;
 
   // Per-joint velocity limits (rad/s). Zero means no limit for that joint.
   ctrl::VectorND m_joint_velocity_limits;

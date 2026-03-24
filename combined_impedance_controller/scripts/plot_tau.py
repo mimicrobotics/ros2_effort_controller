@@ -28,6 +28,7 @@ class TauRecorder(Node):
         tau_total_topic: str,
         tau_commanded_topic: str,
         tau_velocity_limit_topic: str,
+        tau_integral_topic: str,
         mode_topic: str,
         target_frame_topic: str,
         current_frame_topic: str,
@@ -43,6 +44,8 @@ class TauRecorder(Node):
         self.commanded_samples: list[list[float]] = []
         self.velocity_limit_timestamps: list[float] = []
         self.velocity_limit_samples: list[list[float]] = []
+        self.integral_timestamps: list[float] = []
+        self.integral_samples: list[list[float]] = []
         self.mode_timestamps: list[float] = []
         self.mode_values: list[int] = []
         self.target_timestamps: list[float] = []
@@ -66,11 +69,14 @@ class TauRecorder(Node):
         self.create_subscription(
             Float64MultiArray, tau_velocity_limit_topic, self._tau_velocity_limit_cb, 10
         )
+        self.create_subscription(
+            Float64MultiArray, tau_integral_topic, self._tau_integral_cb, 10
+        )
         self.create_subscription(Int32, mode_topic, self._mode_cb, 10)
         self.create_subscription(PoseStamped, target_frame_topic, self._target_cb, 10)
         self.create_subscription(PoseStamped, current_frame_topic, self._current_cb, 10)
         self.get_logger().info(
-            f"Subscribing to {tau_topic}, {tau_damping_topic}, {tau_total_topic}, {tau_commanded_topic}, {tau_velocity_limit_topic}, {mode_topic}, {target_frame_topic}, and {current_frame_topic} — press Ctrl+C to stop and plot"
+            f"Subscribing to {tau_topic}, {tau_damping_topic}, {tau_total_topic}, {tau_commanded_topic}, {tau_velocity_limit_topic}, {tau_integral_topic}, {mode_topic}, {target_frame_topic}, and {current_frame_topic} — press Ctrl+C to stop and plot"
         )
 
     def _stamp(self) -> float:
@@ -98,6 +104,10 @@ class TauRecorder(Node):
     def _tau_velocity_limit_cb(self, msg: Float64MultiArray):
         self.velocity_limit_timestamps.append(self._stamp())
         self.velocity_limit_samples.append(list(msg.data))
+
+    def _tau_integral_cb(self, msg: Float64MultiArray):
+        self.integral_timestamps.append(self._stamp())
+        self.integral_samples.append(list(msg.data))
 
     def _mode_cb(self, msg: Int32):
         self.mode_timestamps.append(self._stamp())
@@ -163,6 +173,11 @@ def main():
         help="Tau velocity limit topic (default: /combined_impedance_controller_right/debug_tau_velocity_limit)",
     )
     parser.add_argument(
+        "--integral-topic",
+        default="/combined_impedance_controller_right/debug_tau_integral",
+        help="Tau integral topic (default: /combined_impedance_controller_right/debug_tau_integral)",
+    )
+    parser.add_argument(
         "--mode-topic",
         default="/combined_impedance_controller_right/debug_control_mode",
         help="Control mode topic (default: /combined_impedance_controller_right/debug_control_mode)",
@@ -186,6 +201,7 @@ def main():
         args.total_topic,
         args.commanded_topic,
         args.velocity_limit_topic,
+        args.integral_topic,
         args.mode_topic,
         args.target_frame_topic,
         args.current_frame_topic,
@@ -255,6 +271,12 @@ def main():
                 node.velocity_limit_timestamps,
                 [s[j] for s in node.velocity_limit_samples],
                 label="tau velocity limit",
+            )
+        if node.integral_samples:
+            ax.plot(
+                node.integral_timestamps,
+                [s[j] for s in node.integral_samples],
+                label="tau integral",
             )
         for t, label in zip(transition_times, transition_labels):
             ax.axvline(t, color="k", linestyle="--", alpha=0.6, label=label)

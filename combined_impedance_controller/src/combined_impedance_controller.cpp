@@ -358,6 +358,10 @@ CombinedImpedanceController::on_configure(
             get_node()->get_name() + std::string("/debug_tau_velocity_limit"),
             10);
 
+    m_tau_integral_pub =
+        get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
+            get_node()->get_name() + std::string("/debug_tau_integral"), 10);
+
     // Publish control mode
     m_control_mode_pub = get_node()->create_publisher<std_msgs::msg::Int32>(
         get_node()->get_name() + std::string("/debug_control_mode"), 10);
@@ -468,7 +472,8 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
   // Compute the task torque
   if (m_debug_topics) {
     publishDebugTopics(m_last_stiffness_torque, m_last_damping_torque,
-                       tau_vel_limit, tau_tot, m_efforts);
+                       m_last_integral_torque, tau_vel_limit, tau_tot,
+                       m_efforts);
   }
 
   return controller_interface::return_type::OK;
@@ -543,6 +548,7 @@ void CombinedImpedanceController::updateNextTrajectoryPoint(
 
 void CombinedImpedanceController::publishDebugTopics(
     const ctrl::VectorND &tau_stiffness, const ctrl::VectorND &tau_damping,
+    const ctrl::VectorND &tau_integral,
     const ctrl::VectorND &tau_velocity_limit, const ctrl::VectorND &tau_total,
     const ctrl::VectorND &tau_commanded) {
   // Cartesian-mode debug (target/current/next_goal poses + angle)
@@ -580,6 +586,12 @@ void CombinedImpedanceController::publishDebugTopics(
     tau_msg.data.assign(tau_velocity_limit.data(),
                         tau_velocity_limit.data() + tau_velocity_limit.size());
     m_tau_velocity_limit_pub->publish(tau_msg);
+  }
+  if (m_tau_integral_pub) {
+    std_msgs::msg::Float64MultiArray tau_msg;
+    tau_msg.data.assign(tau_integral.data(),
+                        tau_integral.data() + tau_integral.size());
+    m_tau_integral_pub->publish(tau_msg);
   }
   if (m_tau_total_pub) {
     std_msgs::msg::Float64MultiArray tau_msg;
@@ -716,6 +728,10 @@ ctrl::VectorND CombinedImpedanceController::computeJointTrajectoryTaskTorque(
       D_d * (m_desired_joint_velocities - q_dot);
   const ctrl::VectorND integral_torque = K_i * m_joint_motion_error_integral;
 
+  m_last_stiffness_torque = stiffness_torque;
+  m_last_damping_torque = damping_torque;
+  m_last_integral_torque = integral_torque;
+
   // Compute the task torque
   return stiffness_torque + damping_torque + integral_torque;
 }
@@ -763,6 +779,7 @@ ctrl::VectorND CombinedImpedanceController::computeCartesianTaskTorque(
 
   m_last_stiffness_torque = stiffness_torque;
   m_last_damping_torque = damping_torque;
+  m_last_integral_torque = integral_torque;
 
   return stiffness_torque + damping_torque + integral_torque;
 }
