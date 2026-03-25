@@ -868,8 +868,8 @@ ctrl::VectorND CombinedImpedanceController::computeTorque(double dt) {
     const double elapsed = (now - m_freq_last_report_time).seconds();
     if (elapsed >= 5.0) {
       const double avg_hz = m_freq_call_count / elapsed;
-      RCLCPP_INFO(get_node()->get_logger(),
-                  "computeTorque avg update rate: %.1f Hz", avg_hz);
+      RCLCPP_DEBUG(get_node()->get_logger(),
+                   "computeTorque avg update rate: %.1f Hz", avg_hz);
       m_freq_call_count = 0;
       m_freq_last_report_time = now;
     }
