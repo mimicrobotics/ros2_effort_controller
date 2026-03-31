@@ -53,3 +53,23 @@ Eigen::MatrixXd compute_correct_damping(
 
   return D_d;
 }
+
+// Overload that accepts per-axis damping ratios as a vector
+Eigen::MatrixXd compute_correct_damping(
+    const Eigen::MatrixXd &Lambda, const Eigen::MatrixXd &K_d,
+    const Eigen::VectorXd &csi,
+    const Eigen::VectorXd diag_correction = Eigen::VectorXd::Zero(6)) {
+  Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> solver(K_d, Lambda);
+  if (solver.info() != Eigen::Success) {
+    throw std::runtime_error("Eigen decomposition failed!");
+  }
+  const Eigen::MatrixXd Q = solver.eigenvectors().transpose().inverse();
+  const Eigen::MatrixXd K_d0 = solver.eigenvalues().asDiagonal();
+
+  Eigen::MatrixXd correction = diag_correction.asDiagonal();
+  const Eigen::MatrixXd D_d0 =
+      2.0 * csi.asDiagonal() * K_d0.cwiseSqrt() + correction;
+
+  const Eigen::MatrixXd D_d = Q * D_d0 * Q.transpose();
+  return D_d;
+}

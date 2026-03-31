@@ -45,7 +45,8 @@ CombinedImpedanceController::on_init() {
   auto_declare<double>("cart_integral_gain.rot_x", default_rot_integral);
   auto_declare<double>("cart_integral_gain.rot_y", default_rot_integral);
   auto_declare<double>("cart_integral_gain.rot_z", default_rot_integral);
-  auto_declare<double>("cart_damping_ratio", std::sqrt(2.0) / 2.0);
+  auto_declare<double>("cart_damping_ratio.trans", std::sqrt(2.0) / 2.0);
+  auto_declare<double>("cart_damping_ratio.rot", std::sqrt(2.0) / 2.0);
   auto_declare<std::vector<double>>("joint_integral_gain",
                                     std::vector<double>());
 
@@ -130,7 +131,10 @@ CombinedImpedanceController::on_configure(
   tmp[5] = get_node()->get_parameter("cart_integral_gain.rot_z").as_double();
 
   m_cartesian_integral_gain = tmp.asDiagonal();
-  m_damping_ratio = get_node()->get_parameter("cart_damping_ratio").as_double();
+  m_damping_ratio_trans =
+      get_node()->get_parameter("cart_damping_ratio.trans").as_double();
+  m_damping_ratio_rot =
+      get_node()->get_parameter("cart_damping_ratio.rot").as_double();
 
   // Set joint stiffness
   const std::vector<double> joint_stiffness =
@@ -749,8 +753,12 @@ ctrl::VectorND CombinedImpedanceController::computeCartesianTaskTorque(
       Base::displayInBaseLink(m_cartesian_stiffness, Base::m_end_effector_link);
 
   const ctrl::Matrix6D K_d = base_link_stiffness;
+  Eigen::Vector<double, 6> damping_ratios;
+  damping_ratios << m_damping_ratio_trans, m_damping_ratio_trans,
+      m_damping_ratio_trans, m_damping_ratio_rot, m_damping_ratio_rot,
+      m_damping_ratio_rot;
   const ctrl::Matrix6D D_d =
-      compute_correct_damping(Lambda, K_d, m_damping_ratio);
+      compute_correct_damping(Lambda, K_d, damping_ratios);
   const ctrl::Matrix6D K_i = m_cartesian_integral_gain;
 
   // Conditional integration: only accumulate when close to the target so that

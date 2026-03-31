@@ -174,7 +174,8 @@ private:
   ctrl::Matrix6D m_cartesian_integral_gain;
   double m_null_space_stiffness;
   double m_null_space_damping;
-  double m_damping_ratio;
+  double m_damping_ratio_trans;
+  double m_damping_ratio_rot;
 
   // Config variables for joint impedance control
   ctrl::MatrixND m_joint_stiffness;
