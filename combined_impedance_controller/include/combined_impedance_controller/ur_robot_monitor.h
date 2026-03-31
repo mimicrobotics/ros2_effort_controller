@@ -146,6 +146,10 @@ private:
   bool remote_control_query_in_flight_{false};
   rclcpp::Time last_remote_control_poll_;
   static constexpr double kRemoteControlPollInterval{2.0};
+
+  // Dashboard reconnection on remote-control mode transition
+  TriggerClient::SharedPtr reconnect_dashboard_client_;
+  void reconnectDashboard();
 };
 
 } // namespace combined_impedance_controller

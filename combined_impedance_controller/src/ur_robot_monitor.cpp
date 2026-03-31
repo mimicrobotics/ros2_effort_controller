@@ -24,6 +24,10 @@ void UrRobotMonitor::onConfigure() {
   last_recovery_attempt_ = node_->get_clock()->now();
   last_remote_control_poll_ = node_->get_clock()->now();
 
+  // Dashboard reconnection client (used after remote-control mode transitions)
+  reconnect_dashboard_client_ = node_->create_client<std_srvs::srv::Trigger>(
+      dashboard_prefix_ + "/connect");
+
   // Recovery service clients
   close_safety_popup_client_ = node_->create_client<std_srvs::srv::Trigger>(
       dashboard_prefix_ + "/close_safety_popup");
@@ -150,12 +154,35 @@ void UrRobotMonitor::pollRemoteControlMode() {
           is_in_remote_control_ = result->remote_control;
           if (is_in_remote_control_) {
             RCLCPP_INFO(node_->get_logger(),
-                        "Robot is now in remote control mode.");
+                        "Robot is now in remote control mode. "
+                        "Reconnecting dashboard client...");
+            reconnectDashboard();
           } else {
             RCLCPP_WARN(node_->get_logger(),
                         "Robot is no longer in remote control mode. "
                         "Refusing to send commands.");
           }
+        }
+      });
+}
+
+void UrRobotMonitor::reconnectDashboard() {
+  if (!reconnect_dashboard_client_->service_is_ready()) {
+    RCLCPP_WARN(node_->get_logger(),
+                "Dashboard connect service not available, skipping reconnect.");
+    return;
+  }
+  auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+  reconnect_dashboard_client_->async_send_request(
+      request, [this](TriggerClient::SharedFuture future) {
+        auto result = future.get();
+        if (result->success) {
+          RCLCPP_INFO(node_->get_logger(),
+                      "Dashboard client reconnected successfully.");
+        } else {
+          RCLCPP_WARN(node_->get_logger(),
+                      "Dashboard client reconnect failed: %s",
+                      result->message.c_str());
         }
       });
 }
