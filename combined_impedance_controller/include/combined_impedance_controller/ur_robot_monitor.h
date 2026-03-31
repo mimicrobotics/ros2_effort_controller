@@ -148,6 +148,7 @@ private:
   static constexpr double kRemoteControlPollInterval{2.0};
 
   // Dashboard reconnection on remote-control mode transition
+  TriggerClient::SharedPtr disconnect_dashboard_client_;
   TriggerClient::SharedPtr reconnect_dashboard_client_;
   void reconnectDashboard();
 };

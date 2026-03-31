@@ -24,7 +24,9 @@ void UrRobotMonitor::onConfigure() {
   last_recovery_attempt_ = node_->get_clock()->now();
   last_remote_control_poll_ = node_->get_clock()->now();
 
-  // Dashboard reconnection client (used after remote-control mode transitions)
+  // Dashboard reconnection clients (used after remote-control mode transitions)
+  disconnect_dashboard_client_ = node_->create_client<std_srvs::srv::Trigger>(
+      dashboard_prefix_ + "/quit");
   reconnect_dashboard_client_ = node_->create_client<std_srvs::srv::Trigger>(
       dashboard_prefix_ + "/connect");
 
@@ -167,23 +169,44 @@ void UrRobotMonitor::pollRemoteControlMode() {
 }
 
 void UrRobotMonitor::reconnectDashboard() {
-  if (!reconnect_dashboard_client_->service_is_ready()) {
+  if (!disconnect_dashboard_client_->service_is_ready()) {
     RCLCPP_WARN(node_->get_logger(),
-                "Dashboard connect service not available, skipping reconnect.");
+                "Dashboard quit service not available, skipping reconnect.");
     return;
   }
+  RCLCPP_INFO(node_->get_logger(),
+              "Disconnecting dashboard client before reconnect...");
   auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
-  reconnect_dashboard_client_->async_send_request(
+  disconnect_dashboard_client_->async_send_request(
       request, [this](TriggerClient::SharedFuture future) {
         auto result = future.get();
-        if (result->success) {
-          RCLCPP_INFO(node_->get_logger(),
-                      "Dashboard client reconnected successfully.");
-        } else {
+        if (!result->success) {
           RCLCPP_WARN(node_->get_logger(),
-                      "Dashboard client reconnect failed: %s",
+                      "Dashboard disconnect failed: %s",
                       result->message.c_str());
         }
+        // Reconnect regardless — disconnect may "fail" if already disconnected
+        if (!reconnect_dashboard_client_->service_is_ready()) {
+          RCLCPP_WARN(node_->get_logger(),
+                      "Dashboard connect service not available after "
+                      "disconnect.");
+          return;
+        }
+        RCLCPP_INFO(node_->get_logger(), "Reconnecting dashboard client...");
+        auto connect_request =
+            std::make_shared<std_srvs::srv::Trigger::Request>();
+        reconnect_dashboard_client_->async_send_request(
+            connect_request, [this](TriggerClient::SharedFuture future) {
+              auto result = future.get();
+              if (result->success) {
+                RCLCPP_INFO(node_->get_logger(),
+                            "Dashboard client reconnected successfully.");
+              } else {
+                RCLCPP_WARN(node_->get_logger(),
+                            "Dashboard client reconnect failed: %s",
+                            result->message.c_str());
+              }
+            });
       });
 }
 
