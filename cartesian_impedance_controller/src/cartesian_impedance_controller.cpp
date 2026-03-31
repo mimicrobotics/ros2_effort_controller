@@ -410,7 +410,7 @@ void CartesianImpedanceController::updateControllerState() {
 void CartesianImpedanceController::updateRobotState() {
   const auto robot_mode_new = static_cast<RobotMode>(
       state_interfaces_[static_cast<uint32_t>(StateInterfaces::ROBOT_MODE)]
-          .get_value());
+          .get_optional().value());
   if (robot_mode_new != robot_mode) {
     robot_mode = robot_mode_new;
     RCLCPP_INFO(get_node()->get_logger(), "Robot mode switched to: %s",
@@ -418,7 +418,7 @@ void CartesianImpedanceController::updateRobotState() {
   }
   const auto safety_mode_new = static_cast<SafetyMode>(
       state_interfaces_[static_cast<uint32_t>(StateInterfaces::SAFETY_MODE)]
-          .get_value());
+          .get_optional().value());
   if (safety_mode_new != safety_mode) {
     safety_mode = safety_mode_new;
     RCLCPP_INFO(get_node()->get_logger(), "Safety mode switched to: %s",
@@ -426,7 +426,7 @@ void CartesianImpedanceController::updateRobotState() {
   }
   const auto program_mode_new = static_cast<ProgramMode>(
       state_interfaces_[static_cast<uint32_t>(StateInterfaces::PROGRAM_RUNNING)]
-          .get_value());
+          .get_optional().value());
   if (program_mode_new != program_mode) {
     program_mode = program_mode_new;
     RCLCPP_INFO(get_node()->get_logger(), "Program mode switched to: %s",

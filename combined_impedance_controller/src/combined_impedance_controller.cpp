@@ -446,7 +446,7 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
     std::vector<double> monitor_values(m_monitor_state_iface_count);
     for (size_t i = 0; i < m_monitor_state_iface_count; ++i) {
       monitor_values[i] =
-          state_interfaces_[m_monitor_state_iface_offset + i].get_value();
+          state_interfaces_[m_monitor_state_iface_offset + i].get_optional().value();
     }
     m_robot_monitor->updateState(monitor_values);
   }

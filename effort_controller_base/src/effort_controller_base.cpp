@@ -607,11 +607,11 @@ void EffortControllerBase::updateJointStates() {
     const auto &position_interface = m_joint_state_pos_handles[i].get();
     const auto &velocity_interface = m_joint_state_vel_handles[i].get();
 
-    m_joint_positions(i) = position_interface.get_value();
-    // m_joint_velocities(i) = (m_dotq_alpha * velocity_interface.get_value() +
+    m_joint_positions(i) = position_interface.get_optional().value();
+    // m_joint_velocities(i) = (m_dotq_alpha * velocity_interface.get_optional().value() +
     // (1 - m_dotq_alpha) * m_old_joint_velocities(i));
     m_joint_velocities(i) =
-        std::round((m_dotq_alpha * velocity_interface.get_value() +
+        std::round((m_dotq_alpha * velocity_interface.get_optional().value() +
                     (1 - m_dotq_alpha) * m_old_joint_velocities(i)) *
                    10000) /
         10000;
