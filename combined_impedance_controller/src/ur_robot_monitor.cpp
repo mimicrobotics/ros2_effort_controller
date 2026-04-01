@@ -23,6 +23,7 @@ void UrRobotMonitor::onConfigure() {
   last_program_restart_attempt_ = node_->get_clock()->now();
   last_recovery_attempt_ = node_->get_clock()->now();
   last_remote_control_poll_ = node_->get_clock()->now();
+  last_dashboard_reconnect_attempt_ = node_->get_clock()->now();
 
   // Dashboard reconnection clients (used after remote-control mode transitions)
   disconnect_dashboard_client_ = node_->create_client<std_srvs::srv::Trigger>(
@@ -154,6 +155,18 @@ void UrRobotMonitor::pollRemoteControlMode() {
           // service recovers and reports remote_control=true, we detect the
           // transition and trigger a dashboard reconnect.
           is_in_remote_control_ = false;
+          // The dashboard TCP socket may be broken (e.g. after a mode switch).
+          // Proactively reconnect so future queries can succeed.
+          if (!dashboard_reconnect_in_flight_) {
+            const auto now = node_->get_clock()->now();
+            if ((now - last_dashboard_reconnect_attempt_).seconds() >=
+                kDashboardReconnectCooldown) {
+              last_dashboard_reconnect_attempt_ = now;
+              RCLCPP_INFO(node_->get_logger(),
+                          "Dashboard query failed, attempting reconnect...");
+              reconnectDashboard();
+            }
+          }
           return;
         }
         if (result->remote_control != is_in_remote_control_) {
@@ -173,11 +186,15 @@ void UrRobotMonitor::pollRemoteControlMode() {
 }
 
 void UrRobotMonitor::reconnectDashboard() {
+  if (dashboard_reconnect_in_flight_) {
+    return;
+  }
   if (!disconnect_dashboard_client_->service_is_ready()) {
     RCLCPP_WARN(node_->get_logger(),
                 "Dashboard quit service not available, skipping reconnect.");
     return;
   }
+  dashboard_reconnect_in_flight_ = true;
   RCLCPP_INFO(node_->get_logger(),
               "Disconnecting dashboard client before reconnect...");
   auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
@@ -194,6 +211,7 @@ void UrRobotMonitor::reconnectDashboard() {
           RCLCPP_WARN(node_->get_logger(),
                       "Dashboard connect service not available after "
                       "disconnect.");
+          dashboard_reconnect_in_flight_ = false;
           return;
         }
         RCLCPP_INFO(node_->get_logger(), "Reconnecting dashboard client...");
@@ -202,6 +220,7 @@ void UrRobotMonitor::reconnectDashboard() {
         reconnect_dashboard_client_->async_send_request(
             connect_request, [this](TriggerClient::SharedFuture future) {
               auto result = future.get();
+              dashboard_reconnect_in_flight_ = false;
               if (result->success) {
                 RCLCPP_INFO(node_->get_logger(),
                             "Dashboard client reconnected successfully.");

@@ -147,9 +147,12 @@ private:
   rclcpp::Time last_remote_control_poll_;
   static constexpr double kRemoteControlPollInterval{2.0};
 
-  // Dashboard reconnection on remote-control mode transition
+  // Dashboard reconnection on remote-control mode transition or query failure
   TriggerClient::SharedPtr disconnect_dashboard_client_;
   TriggerClient::SharedPtr reconnect_dashboard_client_;
+  bool dashboard_reconnect_in_flight_{false};
+  rclcpp::Time last_dashboard_reconnect_attempt_;
+  static constexpr double kDashboardReconnectCooldown{5.0};
   void reconnectDashboard();
 };
 
