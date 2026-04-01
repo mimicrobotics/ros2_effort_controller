@@ -150,6 +150,10 @@ void UrRobotMonitor::pollRemoteControlMode() {
           RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
                                "Failed to query remote control mode: %s",
                                result->answer.c_str());
+          // Treat a failed query as "not in remote control" so that when the
+          // service recovers and reports remote_control=true, we detect the
+          // transition and trigger a dashboard reconnect.
+          is_in_remote_control_ = false;
           return;
         }
         if (result->remote_control != is_in_remote_control_) {
