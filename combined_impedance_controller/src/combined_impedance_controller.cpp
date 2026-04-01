@@ -668,11 +668,12 @@ ctrl::Vector6D CombinedImpedanceController::computeCartMotionError(
   const double max_angle = 0.1;
   const double max_distance = 0.1;
   double angle_clamped = std::clamp(angle, -max_angle, max_angle);
-  distance = std::clamp(distance, 0.0, max_distance);
 
   // Scale errors to allowed magnitudes
   rot_axis = rot_axis * angle_clamped;
-  error_kdl.p = error_kdl.p * distance;
+  if (distance > max_distance) {
+    error_kdl.p *= (max_distance / distance);
+  }
 
   // Reassign values
   ctrl::Vector6D error;
