@@ -2,6 +2,7 @@
 #define UR_ROBOT_MONITOR_H_INCLUDED
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
@@ -154,6 +155,18 @@ private:
   rclcpp::Time last_dashboard_reconnect_attempt_;
   static constexpr double kDashboardReconnectCooldown{5.0};
   void reconnectDashboard();
+
+  // Cached service_is_ready() to avoid DDS discovery overhead in the RT loop.
+  // Once a service is seen as ready, we assume it stays available and only
+  // re-check after a failed service call (or on the periodic cooldown).
+  struct ServiceReadyCache {
+    bool ready{false};
+    rclcpp::Time last_check;
+  };
+  std::unordered_map<const void *, ServiceReadyCache> service_ready_cache_;
+  static constexpr double kServiceReadyRecheckInterval{5.0};
+  bool isServiceReady(rclcpp::ClientBase::SharedPtr client);
+  void invalidateServiceReady(rclcpp::ClientBase::SharedPtr client);
 };
 
 } // namespace combined_impedance_controller

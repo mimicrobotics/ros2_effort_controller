@@ -44,6 +44,26 @@ void UrRobotMonitor::onConfigure() {
       dashboard_prefix_ + "/brake_release");
 }
 
+bool UrRobotMonitor::isServiceReady(rclcpp::ClientBase::SharedPtr client) {
+  const void *key = client.get();
+  auto it = service_ready_cache_.find(key);
+  if (it != service_ready_cache_.end() && it->second.ready) {
+    // Already known to be ready — only re-verify periodically
+    if ((node_->get_clock()->now() - it->second.last_check).seconds() <
+        kServiceReadyRecheckInterval) {
+      return true;
+    }
+  }
+  bool ready = client->service_is_ready();
+  service_ready_cache_[key] = {ready, node_->get_clock()->now()};
+  return ready;
+}
+
+void UrRobotMonitor::invalidateServiceReady(
+    rclcpp::ClientBase::SharedPtr client) {
+  service_ready_cache_.erase(client.get());
+}
+
 void UrRobotMonitor::updateState(const std::vector<double> &state_values) {
   // Indices correspond to requiredStateInterfaces() order:
   //   [0] robot_mode, [1] safety_mode, [2] program_running
@@ -95,7 +115,7 @@ UrRobotMonitor::requiredStateInterfaces(const std::string &tf_prefix) const {
 
 void UrRobotMonitor::asyncTrigger(TriggerClient::SharedPtr &client,
                                   const char *description) {
-  if (!client->service_is_ready()) {
+  if (!isServiceReady(client)) {
     RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
                          "%s service not available, waiting...", description);
     return;
@@ -130,7 +150,7 @@ void UrRobotMonitor::pollRemoteControlMode() {
     return;
   }
 
-  if (!is_in_remote_control_client_->service_is_ready()) {
+  if (!isServiceReady(is_in_remote_control_client_)) {
     RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
                          "is_in_remote_control service not available, "
                          "waiting...");
@@ -189,7 +209,7 @@ void UrRobotMonitor::reconnectDashboard() {
   if (dashboard_reconnect_in_flight_) {
     return;
   }
-  if (!disconnect_dashboard_client_->service_is_ready()) {
+  if (!isServiceReady(disconnect_dashboard_client_)) {
     RCLCPP_WARN(node_->get_logger(),
                 "Dashboard quit service not available, skipping reconnect.");
     return;
@@ -207,7 +227,7 @@ void UrRobotMonitor::reconnectDashboard() {
                       result->message.c_str());
         }
         // Reconnect regardless — disconnect may "fail" if already disconnected
-        if (!reconnect_dashboard_client_->service_is_ready()) {
+        if (!isServiceReady(reconnect_dashboard_client_)) {
           RCLCPP_WARN(node_->get_logger(),
                       "Dashboard connect service not available after "
                       "disconnect.");
@@ -425,7 +445,7 @@ void UrRobotMonitor::validateRunningProgram() {
 
   switch (program_validation_state_) {
   case ProgramValidationState::IDLE: {
-    if (!get_loaded_program_client_->service_is_ready()) {
+    if (!isServiceReady(get_loaded_program_client_)) {
       RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
                            "get_loaded_program service not available, "
                            "waiting...");
@@ -467,7 +487,7 @@ void UrRobotMonitor::validateRunningProgram() {
     // Waiting for GetLoadedProgram callback
     break;
   case ProgramValidationState::STOPPING: {
-    if (!stop_program_client_->service_is_ready()) {
+    if (!isServiceReady(stop_program_client_)) {
       RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
                            "stop service not available, waiting...");
       return;
@@ -528,7 +548,7 @@ void UrRobotMonitor::tryRestartExternalProgram() {
   // to STOPPED, then the normal load+play path will restart it.
   if (force_program_restart_ && program_mode_ == ProgramMode::PLAYING) {
     if (program_restart_state_ == ProgramRestartState::IDLE) {
-      if (!stop_program_client_->service_is_ready()) {
+      if (!isServiceReady(stop_program_client_)) {
         RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
                              "stop service not available, waiting...");
         return;
@@ -567,7 +587,7 @@ void UrRobotMonitor::tryRestartExternalProgram() {
         kProgramRestartCooldown) {
       return;
     }
-    if (!load_program_client_->service_is_ready()) {
+    if (!isServiceReady(load_program_client_)) {
       RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
                            "load_program service not available, waiting...");
       return;
@@ -585,7 +605,16 @@ void UrRobotMonitor::tryRestartExternalProgram() {
           if (result->success) {
             RCLCPP_INFO(node_->get_logger(), "%s loaded successfully.",
                         ur_program_name_.c_str());
-            program_restart_state_ = ProgramRestartState::WAITING_FOR_PLAY;
+            // Guard: program may have been restarted externally (e.g. by another
+            // controller sharing the same dashboard) while the load was in flight.
+            if (program_mode_ == ProgramMode::PLAYING) {
+              RCLCPP_INFO(node_->get_logger(),
+                          "Program already PLAYING after load, skipping play.");
+              program_restart_state_ = ProgramRestartState::IDLE;
+              last_program_restart_attempt_ = node_->get_clock()->now();
+            } else {
+              program_restart_state_ = ProgramRestartState::WAITING_FOR_PLAY;
+            }
           } else {
             RCLCPP_WARN(node_->get_logger(), "Failed to load %s: %s",
                         ur_program_name_.c_str(), result->answer.c_str());
@@ -601,7 +630,15 @@ void UrRobotMonitor::tryRestartExternalProgram() {
     // Waiting for load callback to fire
     break;
   case ProgramRestartState::WAITING_FOR_PLAY: {
-    if (!play_client_->service_is_ready()) {
+    // Guard: program may have started playing between load-complete and now
+    if (program_mode_ == ProgramMode::PLAYING) {
+      RCLCPP_INFO(node_->get_logger(),
+                  "Program already PLAYING, skipping play command.");
+      program_restart_state_ = ProgramRestartState::IDLE;
+      last_program_restart_attempt_ = node_->get_clock()->now();
+      break;
+    }
+    if (!isServiceReady(play_client_)) {
       RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
                            "play service not available, waiting...");
       return;

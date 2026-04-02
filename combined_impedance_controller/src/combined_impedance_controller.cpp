@@ -743,14 +743,24 @@ ctrl::VectorND CombinedImpedanceController::computeJointTrajectoryTaskTorque(
 ctrl::VectorND CombinedImpedanceController::computeCartesianTaskTorque(
     const ctrl::MatrixND &jac, const ctrl::VectorND &q_dot,
     const ctrl::Matrix6D &Lambda, const KDL::Frame &target_frame_snapshot,
-    double dt) {
+    const KDL::Frame &current_frame, double dt) {
   // Compute the motion error
   const ctrl::Vector6D motion_error =
       computeCartMotionError(target_frame_snapshot);
 
-  // Compute the stiffness and damping in the base link
-  const auto base_link_stiffness =
-      Base::displayInBaseLink(m_cartesian_stiffness, Base::m_end_effector_link);
+  // Rotate stiffness tensor from end-effector frame to base link using the
+  // already-computed FK rotation, avoiding a redundant JntToCart() call.
+  ctrl::Matrix3D R;
+  R << current_frame.M.data[0], current_frame.M.data[1],
+      current_frame.M.data[2], current_frame.M.data[3],
+      current_frame.M.data[4], current_frame.M.data[5],
+      current_frame.M.data[6], current_frame.M.data[7],
+      current_frame.M.data[8];
+  ctrl::Matrix6D base_link_stiffness = ctrl::Matrix6D::Zero();
+  base_link_stiffness.topLeftCorner<3, 3>() =
+      R * m_cartesian_stiffness.topLeftCorner<3, 3>() * R.transpose();
+  base_link_stiffness.bottomRightCorner<3, 3>() =
+      R * m_cartesian_stiffness.bottomRightCorner<3, 3>() * R.transpose();
 
   const ctrl::Matrix6D K_d = base_link_stiffness;
   Eigen::Vector<double, 6> damping_ratios;
@@ -941,7 +951,7 @@ ctrl::VectorND CombinedImpedanceController::computeTorque(double dt) {
       }
     } else if (m_control_mode.load() == ControlMode::CARTESIAN) {
       const auto tau_task = computeCartesianTaskTorque(
-          jac, q_dot, Lambda, target_frame_snapshot, dt);
+          jac, q_dot, Lambda, target_frame_snapshot, m_current_frame, dt);
       // Save the last task torque for blending
       m_last_tau_task = tau_task;
       tau += tau_task;

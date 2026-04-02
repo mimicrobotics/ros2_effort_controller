@@ -91,7 +91,7 @@ private:
   ctrl::VectorND computeCartesianTaskTorque(
       const ctrl::MatrixND &jac, const ctrl::VectorND &q_dot,
       const ctrl::Matrix6D &Lambda, const KDL::Frame &target_frame_snapshot,
-      double dt);
+      const KDL::Frame &current_frame, double dt);
   void publishDebugTopics(const ctrl::VectorND &tau_stiffness,
                           const ctrl::VectorND &tau_damping,
                           const ctrl::VectorND &tau_integral,
