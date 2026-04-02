@@ -57,7 +57,6 @@ public:
   static const char *toString(ProgramMode mode);
 
   explicit UrRobotMonitor(rclcpp_lifecycle::LifecycleNode::SharedPtr node);
-  ~UrRobotMonitor() override;
 
   void onConfigure() override;
 
