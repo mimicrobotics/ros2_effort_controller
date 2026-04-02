@@ -6,6 +6,8 @@ RobotMonitor::RobotMonitor(rclcpp_lifecycle::LifecycleNode::SharedPtr node)
     : node_(std::move(node)), controller_state_(ControllerState::STOPPED),
       mimic_robot_mode_(MimicRobotMode::IDLE) {}
 
+RobotMonitor::~RobotMonitor() { deactivate(); }
+
 void RobotMonitor::configure(const std::string &controller_name) {
   // Collision-detection heartbeat subscriber
   heartbeat_subscriber_ = node_->create_subscription<std_msgs::msg::Bool>(
@@ -21,18 +23,35 @@ void RobotMonitor::configure(const std::string &controller_name) {
 }
 
 void RobotMonitor::activate() {
-  std::lock_guard<std::mutex> lock(heartbeat_mutex_);
-  last_heartbeat_time_ = node_->get_clock()->now();
+  {
+    std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+    last_heartbeat_time_ = node_->get_clock()->now();
+  }
+
+  // Start background thread for recovery + mode publish
+  if (!async_running_.load()) {
+    async_running_.store(true);
+    async_thread_ = std::thread(&RobotMonitor::asyncWork, this);
+  }
+}
+
+void RobotMonitor::deactivate() {
+  if (async_running_.load()) {
+    async_running_.store(false);
+    async_cv_.notify_one();
+    if (async_thread_.joinable()) {
+      async_thread_.join();
+    }
+  }
 }
 
 bool RobotMonitor::update() {
   updateCollisionHeartbeat();
   const bool should_freeze = updateControllerState();
 
-  // Publish mimic robot mode for high-level components
-  std_msgs::msg::Int32 mode_msg;
-  mode_msg.data = static_cast<int>(mimic_robot_mode_);
-  robot_mode_publisher_->publish(mode_msg);
+  // Wake background thread for recovery tick + mode publish
+  async_pending_.store(true);
+  async_cv_.notify_one();
 
   return should_freeze;
 }
@@ -71,10 +90,8 @@ bool RobotMonitor::updateControllerState() {
     mimic_robot_mode_ = MimicRobotMode::MOVE;
   }
 
-  // Let the concrete implementation attempt recovery
-  onRecoveryTick();
-
   // Return true when controller should freeze desired poses
+  // (recovery tick runs asynchronously on the background thread)
   return !ready;
 }
 
@@ -128,6 +145,26 @@ void RobotMonitor::heartbeatCallback(const std_msgs::msg::Bool::SharedPtr msg) {
       RCLCPP_WARN(node_->get_logger(),
                   "Controller state changed to UNSAFE (collision detected).");
     }
+  }
+}
+
+void RobotMonitor::asyncWork() {
+  while (async_running_.load()) {
+    {
+      std::unique_lock<std::mutex> lock(async_mutex_);
+      async_cv_.wait(lock, [this] {
+        return async_pending_.load() || !async_running_.load();
+      });
+      async_pending_.store(false);
+      if (!async_running_.load())
+        break;
+    }
+
+    onRecoveryTick();
+
+    std_msgs::msg::Int32 mode_msg;
+    mode_msg.data = static_cast<int>(mimic_robot_mode_.load());
+    robot_mode_publisher_->publish(mode_msg);
   }
 }
 

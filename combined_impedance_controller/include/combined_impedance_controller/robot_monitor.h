@@ -2,8 +2,10 @@
 #define ROBOT_MONITOR_H_INCLUDED
 
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
@@ -28,14 +30,18 @@ public:
   };
 
   explicit RobotMonitor(rclcpp_lifecycle::LifecycleNode::SharedPtr node);
-  virtual ~RobotMonitor() = default;
+  virtual ~RobotMonitor();
 
   /// One-time setup: creates the collision-heartbeat subscriber and robot-mode
   /// publisher, then calls onConfigure() for robot-specific setup.
   void configure(const std::string &controller_name);
 
-  /// Call from on_activate to initialise heartbeat timing.
+  /// Call from on_activate to initialise heartbeat timing and start background
+  /// thread.
   void activate();
+
+  /// Stop the background thread.  Call from on_deactivate.
+  void deactivate();
 
   /// Return the state-interface names this monitor needs the controller to
   /// claim.  The controller will later pass the corresponding values (in the
@@ -68,7 +74,7 @@ protected:
 
   rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
   ControllerState controller_state_;
-  MimicRobotMode mimic_robot_mode_;
+  std::atomic<MimicRobotMode> mimic_robot_mode_;
 
 private:
   void heartbeatCallback(const std_msgs::msg::Bool::SharedPtr msg);
@@ -83,6 +89,14 @@ private:
 
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr heartbeat_subscriber_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr robot_mode_publisher_;
+
+  // Background thread for recovery tick + mode publish (kept off the RT path)
+  void asyncWork();
+  std::thread async_thread_;
+  std::mutex async_mutex_;
+  std::condition_variable async_cv_;
+  std::atomic<bool> async_running_{false};
+  std::atomic<bool> async_pending_{false};
 };
 
 } // namespace combined_impedance_controller

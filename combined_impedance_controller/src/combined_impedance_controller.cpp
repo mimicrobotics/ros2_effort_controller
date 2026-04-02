@@ -455,6 +455,9 @@ CombinedImpedanceController::on_deactivate(
     }
   }
 
+  // Stop robot monitor background thread
+  m_robot_monitor->deactivate();
+
   // Stop drifting by sending zero joint torques
   Base::computeJointEffortCmds(ctrl::VectorND::Zero(Base::m_joint_number));
   Base::writeJointEffortCmds();
@@ -580,30 +583,32 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
   // Throttled timing report every 10 seconds
   const auto now = clock::now();
   if (std::chrono::duration<double>(now - m_timing_last_report).count() >= 10.0) {
-    constexpr double us_to_ms = 1.0 / 1000.0;
-    RCLCPP_INFO(get_node()->get_logger(),
-                "Cycle timing (ms) over %lu calls:\n"
-                "  updateJointStates: avg=%.3f max=%.3f\n"
-                "  updateState:       avg=%.3f max=%.3f\n"
-                "  monitor.update:    avg=%.3f max=%.3f\n"
-                "  computeTorque:     avg=%.3f max=%.3f\n"
-                "  velocityLimits:    avg=%.3f max=%.3f\n"
-                "  effortCmds:        avg=%.3f max=%.3f\n"
-                "  writeCmds:         avg=%.3f max=%.3f\n"
-                "  trajectory:        avg=%.3f max=%.3f\n"
-                "  debugPublish:      avg=%.3f max=%.3f\n"
-                "  total:             avg=%.3f max=%.3f",
-                m_timing_total.count,
-                m_timing_update_joint_states.avg() * us_to_ms, m_timing_update_joint_states.max * us_to_ms,
-                m_timing_update_state.avg() * us_to_ms, m_timing_update_state.max * us_to_ms,
-                m_timing_monitor_update.avg() * us_to_ms, m_timing_monitor_update.max * us_to_ms,
-                m_timing_compute_torque.avg() * us_to_ms, m_timing_compute_torque.max * us_to_ms,
-                m_timing_velocity_limits.avg() * us_to_ms, m_timing_velocity_limits.max * us_to_ms,
-                m_timing_effort_cmds.avg() * us_to_ms, m_timing_effort_cmds.max * us_to_ms,
-                m_timing_write_cmds.avg() * us_to_ms, m_timing_write_cmds.max * us_to_ms,
-                m_timing_trajectory.avg() * us_to_ms, m_timing_trajectory.max * us_to_ms,
-                m_timing_debug_publish.avg() * us_to_ms, m_timing_debug_publish.max * us_to_ms,
-                m_timing_total.avg() * us_to_ms, m_timing_total.max * us_to_ms);
+    if (m_timing_total.max > 2000.0) { // Warn if any single cycle took over 2 ms
+      constexpr double us_to_ms = 1.0 / 1000.0;
+      RCLCPP_WARN(get_node()->get_logger(),
+                  "Cycle timing (ms) over %lu calls:\n"
+                  "  updateJointStates: avg=%.3f max=%.3f\n"
+                  "  updateState:       avg=%.3f max=%.3f\n"
+                  "  monitor.update:    avg=%.3f max=%.3f\n"
+                  "  computeTorque:     avg=%.3f max=%.3f\n"
+                  "  velocityLimits:    avg=%.3f max=%.3f\n"
+                  "  effortCmds:        avg=%.3f max=%.3f\n"
+                  "  writeCmds:         avg=%.3f max=%.3f\n"
+                  "  trajectory:        avg=%.3f max=%.3f\n"
+                  "  debugPublish:      avg=%.3f max=%.3f\n"
+                  "  total:             avg=%.3f max=%.3f",
+                  m_timing_total.count,
+                  m_timing_update_joint_states.avg() * us_to_ms, m_timing_update_joint_states.max * us_to_ms,
+                  m_timing_update_state.avg() * us_to_ms, m_timing_update_state.max * us_to_ms,
+                  m_timing_monitor_update.avg() * us_to_ms, m_timing_monitor_update.max * us_to_ms,
+                  m_timing_compute_torque.avg() * us_to_ms, m_timing_compute_torque.max * us_to_ms,
+                  m_timing_velocity_limits.avg() * us_to_ms, m_timing_velocity_limits.max * us_to_ms,
+                  m_timing_effort_cmds.avg() * us_to_ms, m_timing_effort_cmds.max * us_to_ms,
+                  m_timing_write_cmds.avg() * us_to_ms, m_timing_write_cmds.max * us_to_ms,
+                  m_timing_trajectory.avg() * us_to_ms, m_timing_trajectory.max * us_to_ms,
+                  m_timing_debug_publish.avg() * us_to_ms, m_timing_debug_publish.max * us_to_ms,
+                  m_timing_total.avg() * us_to_ms, m_timing_total.max * us_to_ms);
+    }
     m_timing_update_joint_states.reset();
     m_timing_update_state.reset();
     m_timing_monitor_update.reset();
@@ -689,7 +694,7 @@ void CombinedImpedanceController::updateNextTrajectoryPoint(
 
 void CombinedImpedanceController::debugPublishLoop() {
   using clock = std::chrono::steady_clock;
-  constexpr auto kPeriod = std::chrono::milliseconds(100); // 10 Hz
+  constexpr auto kPeriod = std::chrono::milliseconds(20); // 50 Hz
 
   while (m_debug_thread_running.load()) {
     DebugSnapshot snap;
