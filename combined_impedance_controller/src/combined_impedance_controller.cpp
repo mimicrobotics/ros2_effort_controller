@@ -446,7 +446,13 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
   const auto t_total_start = clock::now();
 
   // Update joint states
-  Base::updateJointStates();
+  {
+    auto t0 = clock::now();
+    Base::updateJointStates();
+    auto t1 = clock::now();
+    m_timing_update_joint_states.record(
+        std::chrono::duration<double, std::micro>(t1 - t0).count());
+  }
 
   // Update robot monitor (heartbeat check, state machine, mode publish)
   {
@@ -479,23 +485,50 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
         std::chrono::duration<double, std::micro>(t1 - t0).count());
 
     // Enforce per-joint velocity limits
-    ctrl::VectorND tau_vel_limit = applyJointVelocityLimits(tau_tot);
+    ctrl::VectorND tau_vel_limit;
+    {
+      auto t0 = clock::now();
+      tau_vel_limit = applyJointVelocityLimits(tau_tot);
+      auto t1 = clock::now();
+      m_timing_velocity_limits.record(
+          std::chrono::duration<double, std::micro>(t1 - t0).count());
+    }
 
     // Saturation of the torque
-    Base::computeJointEffortCmds(tau_tot);
+    {
+      auto t0 = clock::now();
+      Base::computeJointEffortCmds(tau_tot);
+      auto t1 = clock::now();
+      m_timing_effort_cmds.record(
+          std::chrono::duration<double, std::micro>(t1 - t0).count());
+    }
 
     // Write final commands to the hardware interface
-    Base::writeJointEffortCmds();
+    {
+      auto t0 = clock::now();
+      Base::writeJointEffortCmds();
+      auto t1 = clock::now();
+      m_timing_write_cmds.record(
+          std::chrono::duration<double, std::micro>(t1 - t0).count());
+    }
 
     if (m_control_mode.load() == ControlMode::JOINT_TRAJECTORY) {
+      auto t0 = clock::now();
       updateNextTrajectoryPoint(period);
+      auto t1 = clock::now();
+      m_timing_trajectory.record(
+          std::chrono::duration<double, std::micro>(t1 - t0).count());
     }
 
     // Compute the task torque
     if (m_debug_topics) {
+      auto t0 = clock::now();
       publishDebugTopics(m_last_stiffness_torque, m_last_damping_torque,
                          m_last_integral_torque, tau_vel_limit, tau_tot,
                          m_efforts);
+      auto t1 = clock::now();
+      m_timing_debug_publish.record(
+          std::chrono::duration<double, std::micro>(t1 - t0).count());
     }
   }
 
@@ -506,20 +539,39 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
   // Throttled timing report every 5 seconds
   const auto now = clock::now();
   if (std::chrono::duration<double>(now - m_timing_last_report).count() >= 5.0) {
+    constexpr double us_to_ms = 1.0 / 1000.0;
     RCLCPP_INFO(get_node()->get_logger(),
-                "Cycle timing (us) over %lu calls — "
-                "updateState: avg=%.1f max=%.1f | "
-                "monitor.update: avg=%.1f max=%.1f | "
-                "computeTorque: avg=%.1f max=%.1f | "
-                "total: avg=%.1f max=%.1f",
+                "Cycle timing (ms) over %lu calls:\n"
+                "  updateJointStates: avg=%.3f max=%.3f\n"
+                "  updateState:       avg=%.3f max=%.3f\n"
+                "  monitor.update:    avg=%.3f max=%.3f\n"
+                "  computeTorque:     avg=%.3f max=%.3f\n"
+                "  velocityLimits:    avg=%.3f max=%.3f\n"
+                "  effortCmds:        avg=%.3f max=%.3f\n"
+                "  writeCmds:         avg=%.3f max=%.3f\n"
+                "  trajectory:        avg=%.3f max=%.3f\n"
+                "  debugPublish:      avg=%.3f max=%.3f\n"
+                "  total:             avg=%.3f max=%.3f",
                 m_timing_total.count,
-                m_timing_update_state.avg(), m_timing_update_state.max,
-                m_timing_monitor_update.avg(), m_timing_monitor_update.max,
-                m_timing_compute_torque.avg(), m_timing_compute_torque.max,
-                m_timing_total.avg(), m_timing_total.max);
+                m_timing_update_joint_states.avg() * us_to_ms, m_timing_update_joint_states.max * us_to_ms,
+                m_timing_update_state.avg() * us_to_ms, m_timing_update_state.max * us_to_ms,
+                m_timing_monitor_update.avg() * us_to_ms, m_timing_monitor_update.max * us_to_ms,
+                m_timing_compute_torque.avg() * us_to_ms, m_timing_compute_torque.max * us_to_ms,
+                m_timing_velocity_limits.avg() * us_to_ms, m_timing_velocity_limits.max * us_to_ms,
+                m_timing_effort_cmds.avg() * us_to_ms, m_timing_effort_cmds.max * us_to_ms,
+                m_timing_write_cmds.avg() * us_to_ms, m_timing_write_cmds.max * us_to_ms,
+                m_timing_trajectory.avg() * us_to_ms, m_timing_trajectory.max * us_to_ms,
+                m_timing_debug_publish.avg() * us_to_ms, m_timing_debug_publish.max * us_to_ms,
+                m_timing_total.avg() * us_to_ms, m_timing_total.max * us_to_ms);
+    m_timing_update_joint_states.reset();
     m_timing_update_state.reset();
     m_timing_monitor_update.reset();
     m_timing_compute_torque.reset();
+    m_timing_velocity_limits.reset();
+    m_timing_effort_cmds.reset();
+    m_timing_write_cmds.reset();
+    m_timing_trajectory.reset();
+    m_timing_debug_publish.reset();
     m_timing_total.reset();
     m_timing_last_report = now;
   }

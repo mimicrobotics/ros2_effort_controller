@@ -262,9 +262,15 @@ private:
     void reset() { sum = 0.0; max = 0.0; count = 0; }
     double avg() const { return count > 0 ? sum / count : 0.0; }
   };
+  TimingStats m_timing_update_joint_states;
   TimingStats m_timing_update_state;
   TimingStats m_timing_monitor_update;
   TimingStats m_timing_compute_torque;
+  TimingStats m_timing_velocity_limits;
+  TimingStats m_timing_effort_cmds;
+  TimingStats m_timing_write_cmds;
+  TimingStats m_timing_trajectory;
+  TimingStats m_timing_debug_publish;
   TimingStats m_timing_total;
   std::chrono::steady_clock::time_point m_timing_last_report{
       std::chrono::steady_clock::now()};
