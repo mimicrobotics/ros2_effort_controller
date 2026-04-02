@@ -5,6 +5,34 @@ namespace combined_impedance_controller {
 UrRobotMonitor::UrRobotMonitor(rclcpp_lifecycle::LifecycleNode::SharedPtr node)
     : RobotMonitor(std::move(node)) {}
 
+UrRobotMonitor::~UrRobotMonitor() {
+  if (!stop_program_client_) {
+    return;
+  }
+  if (!stop_program_client_->service_is_ready()) {
+    RCLCPP_WARN(node_->get_logger(),
+                "Stop program service not available, skipping program stop on "
+                "shutdown.");
+    return;
+  }
+  RCLCPP_INFO(node_->get_logger(),
+              "Stopping UR program on shutdown...");
+  auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+  auto future = stop_program_client_->async_send_request(request);
+  if (future.wait_for(std::chrono::seconds(2)) == std::future_status::ready) {
+    auto result = future.get();
+    if (result->success) {
+      RCLCPP_INFO(node_->get_logger(), "UR program stopped successfully.");
+    } else {
+      RCLCPP_WARN(node_->get_logger(), "Failed to stop UR program: %s",
+                  result->message.c_str());
+    }
+  } else {
+    RCLCPP_WARN(node_->get_logger(),
+                "Timed out waiting for program stop on shutdown.");
+  }
+}
+
 void UrRobotMonitor::onConfigure() {
   ur_program_name_ = node_->get_parameter("ur_program_name").as_string();
   dashboard_prefix_ = node_->get_parameter("dashboard_prefix").as_string();
