@@ -3,7 +3,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 
 #include <effort_controller_base/effort_controller_base.h>
 
@@ -54,6 +56,7 @@ class CombinedImpedanceController
     : public virtual effort_controller_base::EffortControllerBase {
 public:
   CombinedImpedanceController();
+  ~CombinedImpedanceController() override;
 
   virtual LifecycleNodeInterface::CallbackReturn on_init() override;
 
@@ -93,12 +96,8 @@ private:
       const ctrl::MatrixND &jac, const ctrl::VectorND &q_dot,
       const ctrl::Matrix6D &Lambda, const KDL::Frame &target_frame_snapshot,
       const KDL::Frame &current_frame, double dt);
-  void publishDebugTopics(const ctrl::VectorND &tau_stiffness,
-                          const ctrl::VectorND &tau_damping,
-                          const ctrl::VectorND &tau_integral,
-                          const ctrl::VectorND &tau_velocity_limit,
-                          const ctrl::VectorND &tau_total,
-                          const ctrl::VectorND &tau_commanded);
+  struct DebugSnapshot; // forward-declared, defined below
+  void publishDebugTopics(const DebugSnapshot &snap);
   void freezeDesiredPoses();
   void updateNextTrajectoryPoint(const rclcpp::Duration &period);
   static ctrl::Vector6D toVector6D(const geometry_msgs::msg::Wrench &w);
@@ -138,11 +137,39 @@ private:
       m_tau_integral_pub;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr m_control_mode_pub;
 
+  enum class ControlMode {
+    CARTESIAN,
+    JOINT_TRAJECTORY,
+  };
+
   // Debug state cached by computeCartMotionError for publishDebugTopics
   KDL::Frame m_debug_target_frame;
   KDL::Frame m_debug_next_goal_frame;
   double m_debug_angle{0.0};
   bool m_debug_cart_valid{false};
+
+  // Async debug publish thread (throttled to 10 Hz)
+  struct DebugSnapshot {
+    ctrl::VectorND tau_stiffness;
+    ctrl::VectorND tau_damping;
+    ctrl::VectorND tau_integral;
+    ctrl::VectorND tau_velocity_limit;
+    ctrl::VectorND tau_total;
+    ctrl::VectorND tau_commanded;
+    KDL::Frame target_frame;
+    KDL::Frame current_frame;
+    KDL::Frame next_goal_frame;
+    double angle{0.0};
+    bool cart_valid{false};
+    ControlMode control_mode{ControlMode::CARTESIAN};
+  };
+  std::mutex m_debug_mutex;
+  std::condition_variable m_debug_cv;
+  DebugSnapshot m_debug_snapshot;
+  bool m_debug_snapshot_ready{false};
+  std::atomic<bool> m_debug_thread_running{false};
+  std::thread m_debug_thread;
+  void debugPublishLoop();
 
   // Controller mode service
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr m_mode_switch_srv;
@@ -229,10 +256,6 @@ private:
       50.0}; ///< Braking gain when over speed limit.
   ctrl::VectorND applyJointVelocityLimits(ctrl::VectorND &tau);
 
-  enum class ControlMode {
-    CARTESIAN,
-    JOINT_TRAJECTORY,
-  };
   std::atomic<ControlMode> m_control_mode{ControlMode::CARTESIAN};
 
   /// Protects m_target_wrench, m_ft_sensor_wrench, and m_target_frame

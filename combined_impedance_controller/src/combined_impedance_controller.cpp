@@ -7,6 +7,16 @@ namespace combined_impedance_controller {
 CombinedImpedanceController::CombinedImpedanceController()
     : Base::EffortControllerBase() {}
 
+CombinedImpedanceController::~CombinedImpedanceController() {
+  if (m_debug_thread_running.load()) {
+    m_debug_thread_running.store(false);
+    m_debug_cv.notify_one();
+    if (m_debug_thread.joinable()) {
+      m_debug_thread.join();
+    }
+  }
+}
+
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
 CombinedImpedanceController::on_init() {
   const auto ret = Base::on_init();
@@ -422,6 +432,13 @@ CombinedImpedanceController::on_activate(
 
   // Default to cartesian mode on activation
   m_control_mode.store(ControlMode::CARTESIAN);
+
+  // Start async debug publish thread if debug topics are enabled
+  if (m_debug_topics && !m_debug_thread_running.load()) {
+    m_debug_thread_running.store(true);
+    m_debug_thread = std::thread(&CombinedImpedanceController::debugPublishLoop, this);
+  }
+
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::SUCCESS;
 }
@@ -429,6 +446,15 @@ CombinedImpedanceController::on_activate(
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
 CombinedImpedanceController::on_deactivate(
     const rclcpp_lifecycle::State &previous_state) {
+  // Stop debug publish thread
+  if (m_debug_thread_running.load()) {
+    m_debug_thread_running.store(false);
+    m_debug_cv.notify_one();
+    if (m_debug_thread.joinable()) {
+      m_debug_thread.join();
+    }
+  }
+
   // Stop drifting by sending zero joint torques
   Base::computeJointEffortCmds(ctrl::VectorND::Zero(Base::m_joint_number));
   Base::writeJointEffortCmds();
@@ -520,12 +546,27 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
           std::chrono::duration<double, std::micro>(t1 - t0).count());
     }
 
-    // Compute the task torque
+    // Hand debug data off to the async publish thread (non-blocking)
     if (m_debug_topics) {
       auto t0 = clock::now();
-      publishDebugTopics(m_last_stiffness_torque, m_last_damping_torque,
-                         m_last_integral_torque, tau_vel_limit, tau_tot,
-                         m_efforts);
+      {
+        std::lock_guard<std::mutex> lk(m_debug_mutex);
+        m_debug_snapshot.tau_stiffness = m_last_stiffness_torque;
+        m_debug_snapshot.tau_damping = m_last_damping_torque;
+        m_debug_snapshot.tau_integral = m_last_integral_torque;
+        m_debug_snapshot.tau_velocity_limit = tau_vel_limit;
+        m_debug_snapshot.tau_total = tau_tot;
+        m_debug_snapshot.tau_commanded = m_efforts;
+        m_debug_snapshot.target_frame = m_debug_target_frame;
+        m_debug_snapshot.current_frame = m_current_frame;
+        m_debug_snapshot.next_goal_frame = m_debug_next_goal_frame;
+        m_debug_snapshot.angle = m_debug_angle;
+        m_debug_snapshot.cart_valid = m_debug_cart_valid;
+        m_debug_snapshot.control_mode = m_control_mode.load();
+        m_debug_snapshot_ready = true;
+      }
+      m_debug_cv.notify_one();
+      m_debug_cart_valid = false;
       auto t1 = clock::now();
       m_timing_debug_publish.record(
           std::chrono::duration<double, std::micro>(t1 - t0).count());
@@ -536,9 +577,9 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
       std::chrono::duration<double, std::micro>(clock::now() - t_total_start)
           .count());
 
-  // Throttled timing report every 5 seconds
+  // Throttled timing report every 10 seconds
   const auto now = clock::now();
-  if (std::chrono::duration<double>(now - m_timing_last_report).count() >= 5.0) {
+  if (std::chrono::duration<double>(now - m_timing_last_report).count() >= 10.0) {
     constexpr double us_to_ms = 1.0 / 1000.0;
     RCLCPP_INFO(get_node()->get_logger(),
                 "Cycle timing (ms) over %lu calls:\n"
@@ -646,68 +687,88 @@ void CombinedImpedanceController::updateNextTrajectoryPoint(
   }
 }
 
+void CombinedImpedanceController::debugPublishLoop() {
+  using clock = std::chrono::steady_clock;
+  constexpr auto kPeriod = std::chrono::milliseconds(100); // 10 Hz
+
+  while (m_debug_thread_running.load()) {
+    DebugSnapshot snap;
+    {
+      std::unique_lock<std::mutex> lk(m_debug_mutex);
+      m_debug_cv.wait_for(lk, kPeriod, [this] {
+        return m_debug_snapshot_ready || !m_debug_thread_running.load();
+      });
+      if (!m_debug_thread_running.load()) break;
+      if (!m_debug_snapshot_ready) continue;
+      snap = m_debug_snapshot;
+      m_debug_snapshot_ready = false;
+    }
+
+    publishDebugTopics(snap);
+
+    // Sleep for the remainder of the period to enforce 10 Hz cap
+    std::this_thread::sleep_until(clock::now() + kPeriod);
+  }
+}
+
 void CombinedImpedanceController::publishDebugTopics(
-    const ctrl::VectorND &tau_stiffness, const ctrl::VectorND &tau_damping,
-    const ctrl::VectorND &tau_integral,
-    const ctrl::VectorND &tau_velocity_limit, const ctrl::VectorND &tau_total,
-    const ctrl::VectorND &tau_commanded) {
+    const DebugSnapshot &snap) {
   // Cartesian-mode debug (target/current/next_goal poses + angle)
-  if (m_debug_cart_valid) {
+  if (snap.cart_valid) {
     const auto stamp = get_node()->now();
     m_target_pose_pub->publish(
-        toPoseStamped(m_debug_target_frame, Base::m_robot_base_link, stamp));
+        toPoseStamped(snap.target_frame, Base::m_robot_base_link, stamp));
     m_current_pose_pub->publish(
-        toPoseStamped(m_current_frame, Base::m_robot_base_link, stamp));
+        toPoseStamped(snap.current_frame, Base::m_robot_base_link, stamp));
     m_next_goal_pose_pub->publish(
-        toPoseStamped(m_debug_next_goal_frame, Base::m_robot_base_link, stamp));
+        toPoseStamped(snap.next_goal_frame, Base::m_robot_base_link, stamp));
 
     std_msgs::msg::Float64 angle_msg;
-    angle_msg.data = m_debug_angle;
+    angle_msg.data = snap.angle;
     m_angle_pub->publish(angle_msg);
-
-    m_debug_cart_valid = false;
   }
 
   // Tau and control mode (always published in debug mode)
   if (m_tau_stiffness_pub) {
     std_msgs::msg::Float64MultiArray tau_msg;
-    tau_msg.data.assign(tau_stiffness.data(),
-                        tau_stiffness.data() + tau_stiffness.size());
+    tau_msg.data.assign(snap.tau_stiffness.data(),
+                        snap.tau_stiffness.data() + snap.tau_stiffness.size());
     m_tau_stiffness_pub->publish(tau_msg);
   }
   if (m_tau_damping_pub) {
     std_msgs::msg::Float64MultiArray tau_msg;
-    tau_msg.data.assign(tau_damping.data(),
-                        tau_damping.data() + tau_damping.size());
+    tau_msg.data.assign(snap.tau_damping.data(),
+                        snap.tau_damping.data() + snap.tau_damping.size());
     m_tau_damping_pub->publish(tau_msg);
   }
   if (m_tau_velocity_limit_pub) {
     std_msgs::msg::Float64MultiArray tau_msg;
-    tau_msg.data.assign(tau_velocity_limit.data(),
-                        tau_velocity_limit.data() + tau_velocity_limit.size());
+    tau_msg.data.assign(snap.tau_velocity_limit.data(),
+                        snap.tau_velocity_limit.data() + snap.tau_velocity_limit.size());
     m_tau_velocity_limit_pub->publish(tau_msg);
   }
   if (m_tau_integral_pub) {
     std_msgs::msg::Float64MultiArray tau_msg;
-    tau_msg.data.assign(tau_integral.data(),
-                        tau_integral.data() + tau_integral.size());
+    tau_msg.data.assign(snap.tau_integral.data(),
+                        snap.tau_integral.data() + snap.tau_integral.size());
     m_tau_integral_pub->publish(tau_msg);
   }
   if (m_tau_total_pub) {
     std_msgs::msg::Float64MultiArray tau_msg;
-    tau_msg.data.assign(tau_total.data(), tau_total.data() + tau_total.size());
+    tau_msg.data.assign(snap.tau_total.data(),
+                        snap.tau_total.data() + snap.tau_total.size());
     m_tau_total_pub->publish(tau_msg);
   }
   if (m_tau_commanded_pub) {
     std_msgs::msg::Float64MultiArray tau_msg;
-    tau_msg.data.assign(tau_commanded.data(),
-                        tau_commanded.data() + tau_commanded.size());
+    tau_msg.data.assign(snap.tau_commanded.data(),
+                        snap.tau_commanded.data() + snap.tau_commanded.size());
     m_tau_commanded_pub->publish(tau_msg);
   }
 
   if (m_control_mode_pub) {
     std_msgs::msg::Int32 mode_msg;
-    mode_msg.data = static_cast<int32_t>(m_control_mode.load());
+    mode_msg.data = static_cast<int32_t>(snap.control_mode);
     m_control_mode_pub->publish(mode_msg);
   }
 }
