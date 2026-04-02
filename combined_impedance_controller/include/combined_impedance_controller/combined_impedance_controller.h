@@ -2,6 +2,7 @@
 #define COMBINED_IMPEDANCE_CONTROLLER_H_INCLUDED
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 
 #include <effort_controller_base/effort_controller_base.h>
@@ -247,6 +248,26 @@ private:
   unsigned long m_freq_call_count{0};
   rclcpp::Time m_freq_last_report_time;
   bool m_freq_initialized{false};
+
+  // Cycle-time profiling (throttled debug output every 5 s)
+  struct TimingStats {
+    double sum{0.0};
+    double max{0.0};
+    unsigned long count{0};
+    void record(double us) {
+      sum += us;
+      ++count;
+      if (us > max) max = us;
+    }
+    void reset() { sum = 0.0; max = 0.0; count = 0; }
+    double avg() const { return count > 0 ? sum / count : 0.0; }
+  };
+  TimingStats m_timing_update_state;
+  TimingStats m_timing_monitor_update;
+  TimingStats m_timing_compute_torque;
+  TimingStats m_timing_total;
+  std::chrono::steady_clock::time_point m_timing_last_report{
+      std::chrono::steady_clock::now()};
 };
 
 } // namespace combined_impedance_controller

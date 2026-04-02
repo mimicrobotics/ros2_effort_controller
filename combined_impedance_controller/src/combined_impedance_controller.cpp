@@ -442,42 +442,86 @@ CombinedImpedanceController::on_deactivate(
 controller_interface::return_type
 CombinedImpedanceController::update(const rclcpp::Time &time,
                                     const rclcpp::Duration &period) {
+  using clock = std::chrono::steady_clock;
+  const auto t_total_start = clock::now();
+
   // Update joint states
   Base::updateJointStates();
 
   // Update robot monitor (heartbeat check, state machine, mode publish)
   {
+    auto t0 = clock::now();
     std::vector<double> monitor_values(m_monitor_state_iface_count);
     for (size_t i = 0; i < m_monitor_state_iface_count; ++i) {
       monitor_values[i] =
           state_interfaces_[m_monitor_state_iface_offset + i].get_optional().value();
     }
     m_robot_monitor->updateState(monitor_values);
+    auto t1 = clock::now();
+    m_timing_update_state.record(
+        std::chrono::duration<double, std::micro>(t1 - t0).count());
   }
-  if (m_robot_monitor->update()) {
-    freezeDesiredPoses();
-  }
-
-  ctrl::VectorND tau_tot = computeTorque(period.seconds());
-
-  // Enforce per-joint velocity limits
-  ctrl::VectorND tau_vel_limit = applyJointVelocityLimits(tau_tot);
-
-  // Saturation of the torque
-  Base::computeJointEffortCmds(tau_tot);
-
-  // Write final commands to the hardware interface
-  Base::writeJointEffortCmds();
-
-  if (m_control_mode.load() == ControlMode::JOINT_TRAJECTORY) {
-    updateNextTrajectoryPoint(period);
+  {
+    auto t0 = clock::now();
+    if (m_robot_monitor->update()) {
+      freezeDesiredPoses();
+    }
+    auto t1 = clock::now();
+    m_timing_monitor_update.record(
+        std::chrono::duration<double, std::micro>(t1 - t0).count());
   }
 
-  // Compute the task torque
-  if (m_debug_topics) {
-    publishDebugTopics(m_last_stiffness_torque, m_last_damping_torque,
-                       m_last_integral_torque, tau_vel_limit, tau_tot,
-                       m_efforts);
+  {
+    auto t0 = clock::now();
+    ctrl::VectorND tau_tot = computeTorque(period.seconds());
+    auto t1 = clock::now();
+    m_timing_compute_torque.record(
+        std::chrono::duration<double, std::micro>(t1 - t0).count());
+
+    // Enforce per-joint velocity limits
+    ctrl::VectorND tau_vel_limit = applyJointVelocityLimits(tau_tot);
+
+    // Saturation of the torque
+    Base::computeJointEffortCmds(tau_tot);
+
+    // Write final commands to the hardware interface
+    Base::writeJointEffortCmds();
+
+    if (m_control_mode.load() == ControlMode::JOINT_TRAJECTORY) {
+      updateNextTrajectoryPoint(period);
+    }
+
+    // Compute the task torque
+    if (m_debug_topics) {
+      publishDebugTopics(m_last_stiffness_torque, m_last_damping_torque,
+                         m_last_integral_torque, tau_vel_limit, tau_tot,
+                         m_efforts);
+    }
+  }
+
+  m_timing_total.record(
+      std::chrono::duration<double, std::micro>(clock::now() - t_total_start)
+          .count());
+
+  // Throttled timing report every 5 seconds
+  const auto now = clock::now();
+  if (std::chrono::duration<double>(now - m_timing_last_report).count() >= 5.0) {
+    RCLCPP_INFO(get_node()->get_logger(),
+                "Cycle timing (us) over %lu calls — "
+                "updateState: avg=%.1f max=%.1f | "
+                "monitor.update: avg=%.1f max=%.1f | "
+                "computeTorque: avg=%.1f max=%.1f | "
+                "total: avg=%.1f max=%.1f",
+                m_timing_total.count,
+                m_timing_update_state.avg(), m_timing_update_state.max,
+                m_timing_monitor_update.avg(), m_timing_monitor_update.max,
+                m_timing_compute_torque.avg(), m_timing_compute_torque.max,
+                m_timing_total.avg(), m_timing_total.max);
+    m_timing_update_state.reset();
+    m_timing_monitor_update.reset();
+    m_timing_compute_torque.reset();
+    m_timing_total.reset();
+    m_timing_last_report = now;
   }
 
   return controller_interface::return_type::OK;
