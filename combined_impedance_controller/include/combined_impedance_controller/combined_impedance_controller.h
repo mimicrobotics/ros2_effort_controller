@@ -136,6 +136,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
       m_tau_integral_pub;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr m_control_mode_pub;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr m_trajectory_ack_pub;
 
   enum class ControlMode {
     CARTESIAN,
@@ -190,6 +191,9 @@ private:
   double m_traj_elapsed{0.0};
   bool m_traj_active{false};
   std::mutex m_traj_mutex; ///< Guards traj state and control mode transitions.
+  /// Stamp of the last accepted trajectory, used to dedup Python-side retries
+  /// that republish the same trajectory when an ack is delayed.
+  rclcpp::Time m_last_accepted_traj_stamp{0, 0, RCL_ROS_TIME};
   static constexpr double kModeHeartbeatTimeout{0.3}; ///< 300ms watchdog.
 
 #if LOGGING
@@ -280,9 +284,14 @@ private:
     void record(double us) {
       sum += us;
       ++count;
-      if (us > max) max = us;
+      if (us > max)
+        max = us;
     }
-    void reset() { sum = 0.0; max = 0.0; count = 0; }
+    void reset() {
+      sum = 0.0;
+      max = 0.0;
+      count = 0;
+    }
     double avg() const { return count > 0 ? sum / count : 0.0; }
   };
   TimingStats m_timing_update_joint_states;

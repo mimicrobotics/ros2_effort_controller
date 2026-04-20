@@ -305,6 +305,9 @@ CombinedImpedanceController::on_configure(
   m_data_publisher = get_node()->create_publisher<debug_msg::msg::Debug>(
       get_node()->get_name() + std::string("/data"), 1);
 
+  m_trajectory_ack_pub = get_node()->create_publisher<std_msgs::msg::Empty>(
+      get_node()->get_name() + std::string("/trajectory_ack"), 1);
+
   m_data_impedance_publisher =
       get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
           get_node()->get_name() + std::string("/data_impedance"), 1);
@@ -436,7 +439,8 @@ CombinedImpedanceController::on_activate(
   // Start async debug publish thread if debug topics are enabled
   if (m_debug_topics && !m_debug_thread_running.load()) {
     m_debug_thread_running.store(true);
-    m_debug_thread = std::thread(&CombinedImpedanceController::debugPublishLoop, this);
+    m_debug_thread =
+        std::thread(&CombinedImpedanceController::debugPublishLoop, this);
   }
 
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
@@ -488,8 +492,9 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
     auto t0 = clock::now();
     std::vector<double> monitor_values(m_monitor_state_iface_count);
     for (size_t i = 0; i < m_monitor_state_iface_count; ++i) {
-      monitor_values[i] =
-          state_interfaces_[m_monitor_state_iface_offset + i].get_optional().value();
+      monitor_values[i] = state_interfaces_[m_monitor_state_iface_offset + i]
+                              .get_optional()
+                              .value();
     }
     m_robot_monitor->updateState(monitor_values);
     auto t1 = clock::now();
@@ -582,32 +587,43 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
 
   // Throttled timing report every 10 seconds
   const auto now = clock::now();
-  if (std::chrono::duration<double>(now - m_timing_last_report).count() >= 10.0) {
-    if (m_timing_total.max > 2000.0) { // Warn if any single cycle took over 2 ms
+  if (std::chrono::duration<double>(now - m_timing_last_report).count() >=
+      10.0) {
+    if (m_timing_total.max >
+        2000.0) { // Warn if any single cycle took over 2 ms
       constexpr double us_to_ms = 1.0 / 1000.0;
-      RCLCPP_WARN(get_node()->get_logger(),
-                  "Cycle timing (ms) over %lu calls:\n"
-                  "  updateJointStates: avg=%.3f max=%.3f\n"
-                  "  updateState:       avg=%.3f max=%.3f\n"
-                  "  monitor.update:    avg=%.3f max=%.3f\n"
-                  "  computeTorque:     avg=%.3f max=%.3f\n"
-                  "  velocityLimits:    avg=%.3f max=%.3f\n"
-                  "  effortCmds:        avg=%.3f max=%.3f\n"
-                  "  writeCmds:         avg=%.3f max=%.3f\n"
-                  "  trajectory:        avg=%.3f max=%.3f\n"
-                  "  debugPublish:      avg=%.3f max=%.3f\n"
-                  "  total:             avg=%.3f max=%.3f",
-                  m_timing_total.count,
-                  m_timing_update_joint_states.avg() * us_to_ms, m_timing_update_joint_states.max * us_to_ms,
-                  m_timing_update_state.avg() * us_to_ms, m_timing_update_state.max * us_to_ms,
-                  m_timing_monitor_update.avg() * us_to_ms, m_timing_monitor_update.max * us_to_ms,
-                  m_timing_compute_torque.avg() * us_to_ms, m_timing_compute_torque.max * us_to_ms,
-                  m_timing_velocity_limits.avg() * us_to_ms, m_timing_velocity_limits.max * us_to_ms,
-                  m_timing_effort_cmds.avg() * us_to_ms, m_timing_effort_cmds.max * us_to_ms,
-                  m_timing_write_cmds.avg() * us_to_ms, m_timing_write_cmds.max * us_to_ms,
-                  m_timing_trajectory.avg() * us_to_ms, m_timing_trajectory.max * us_to_ms,
-                  m_timing_debug_publish.avg() * us_to_ms, m_timing_debug_publish.max * us_to_ms,
-                  m_timing_total.avg() * us_to_ms, m_timing_total.max * us_to_ms);
+      RCLCPP_WARN(
+          get_node()->get_logger(),
+          "Cycle timing (ms) over %lu calls:\n"
+          "  updateJointStates: avg=%.3f max=%.3f\n"
+          "  updateState:       avg=%.3f max=%.3f\n"
+          "  monitor.update:    avg=%.3f max=%.3f\n"
+          "  computeTorque:     avg=%.3f max=%.3f\n"
+          "  velocityLimits:    avg=%.3f max=%.3f\n"
+          "  effortCmds:        avg=%.3f max=%.3f\n"
+          "  writeCmds:         avg=%.3f max=%.3f\n"
+          "  trajectory:        avg=%.3f max=%.3f\n"
+          "  debugPublish:      avg=%.3f max=%.3f\n"
+          "  total:             avg=%.3f max=%.3f",
+          m_timing_total.count, m_timing_update_joint_states.avg() * us_to_ms,
+          m_timing_update_joint_states.max * us_to_ms,
+          m_timing_update_state.avg() * us_to_ms,
+          m_timing_update_state.max * us_to_ms,
+          m_timing_monitor_update.avg() * us_to_ms,
+          m_timing_monitor_update.max * us_to_ms,
+          m_timing_compute_torque.avg() * us_to_ms,
+          m_timing_compute_torque.max * us_to_ms,
+          m_timing_velocity_limits.avg() * us_to_ms,
+          m_timing_velocity_limits.max * us_to_ms,
+          m_timing_effort_cmds.avg() * us_to_ms,
+          m_timing_effort_cmds.max * us_to_ms,
+          m_timing_write_cmds.avg() * us_to_ms,
+          m_timing_write_cmds.max * us_to_ms,
+          m_timing_trajectory.avg() * us_to_ms,
+          m_timing_trajectory.max * us_to_ms,
+          m_timing_debug_publish.avg() * us_to_ms,
+          m_timing_debug_publish.max * us_to_ms,
+          m_timing_total.avg() * us_to_ms, m_timing_total.max * us_to_ms);
     }
     m_timing_update_joint_states.reset();
     m_timing_update_state.reset();
@@ -703,8 +719,10 @@ void CombinedImpedanceController::debugPublishLoop() {
       m_debug_cv.wait_for(lk, kPeriod, [this] {
         return m_debug_snapshot_ready || !m_debug_thread_running.load();
       });
-      if (!m_debug_thread_running.load()) break;
-      if (!m_debug_snapshot_ready) continue;
+      if (!m_debug_thread_running.load())
+        break;
+      if (!m_debug_snapshot_ready)
+        continue;
       snap = m_debug_snapshot;
       m_debug_snapshot_ready = false;
     }
@@ -749,7 +767,8 @@ void CombinedImpedanceController::publishDebugTopics(
   if (m_tau_velocity_limit_pub) {
     std_msgs::msg::Float64MultiArray tau_msg;
     tau_msg.data.assign(snap.tau_velocity_limit.data(),
-                        snap.tau_velocity_limit.data() + snap.tau_velocity_limit.size());
+                        snap.tau_velocity_limit.data() +
+                            snap.tau_velocity_limit.size());
     m_tau_velocity_limit_pub->publish(tau_msg);
   }
   if (m_tau_integral_pub) {
@@ -914,9 +933,8 @@ ctrl::VectorND CombinedImpedanceController::computeCartesianTaskTorque(
   // already-computed FK rotation, avoiding a redundant JntToCart() call.
   ctrl::Matrix3D R;
   R << current_frame.M.data[0], current_frame.M.data[1],
-      current_frame.M.data[2], current_frame.M.data[3],
-      current_frame.M.data[4], current_frame.M.data[5],
-      current_frame.M.data[6], current_frame.M.data[7],
+      current_frame.M.data[2], current_frame.M.data[3], current_frame.M.data[4],
+      current_frame.M.data[5], current_frame.M.data[6], current_frame.M.data[7],
       current_frame.M.data[8];
   ctrl::Matrix6D base_link_stiffness = ctrl::Matrix6D::Zero();
   base_link_stiffness.topLeftCorner<3, 3>() =
@@ -1321,6 +1339,18 @@ void CombinedImpedanceController::jointTrajectoryCallback(
     return;
   }
 
+  // Dedup: the Python homing manager republishes the same trajectory (same
+  // header stamp) while waiting for an ack. If we're already executing that
+  // trajectory, re-ack and skip re-seeding.
+  {
+    std::lock_guard<std::mutex> lock(m_traj_mutex);
+    if (m_traj_active &&
+        rclcpp::Time(msg->header.stamp) == m_last_accepted_traj_stamp) {
+      m_trajectory_ack_pub->publish(std_msgs::msg::Empty());
+      return;
+    }
+  }
+
   // Reject trajectory if not in JOINT_TRAJECTORY mode
   {
     std::lock_guard<std::mutex> lock(m_traj_mutex);
@@ -1391,11 +1421,13 @@ void CombinedImpedanceController::jointTrajectoryCallback(
   m_desired_joint_velocities = ctrl::VectorND::Zero(Base::m_joint_number);
   m_traj_elapsed = 0.0;
   m_traj_active = true;
+  m_last_accepted_traj_stamp = rclcpp::Time(msg->header.stamp);
 
   RCLCPP_INFO(get_node()->get_logger(),
               "CombinedImpedanceController: Accepted trajectory with %zu "
               "points. Target set to last waypoint.",
               msg->points.size());
+  m_trajectory_ack_pub->publish(std_msgs::msg::Empty());
 }
 
 void CombinedImpedanceController::modeHeartbeatCallback(
