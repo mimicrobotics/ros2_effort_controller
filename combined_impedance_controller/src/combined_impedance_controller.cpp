@@ -1330,12 +1330,19 @@ void CombinedImpedanceController::modeSwitchCallback(
 
 void CombinedImpedanceController::jointTrajectoryCallback(
     const trajectory_msgs::msg::JointTrajectory::SharedPtr msg) {
-  // Empty trajectory = cancel active trajectory (hold current joint positions).
-  // Mode switching is handled by the controller_mode_switch service.
+  // Empty trajectory = cancel active trajectory and revert to CARTESIAN
+  // impedance, mirroring the ROS1 bimanual controller. Resets the blend,
+  // the heartbeat latch, and the impedance target via freezeDesiredPoses().
   if (msg->points.empty()) {
     std::lock_guard<std::mutex> lock(m_traj_mutex);
+    m_traj_active = false;
+    m_blend_active = false;
+    m_mode_heartbeat_received.store(false);
+    m_control_mode.store(ControlMode::CARTESIAN);
+    freezeDesiredPoses();
     RCLCPP_INFO(get_node()->get_logger(),
-                "CombinedImpedanceController: Cancelling active trajectory.");
+                "CombinedImpedanceController: Empty trajectory, switched to "
+                "CARTESIAN.");
     return;
   }
 
@@ -1351,77 +1358,104 @@ void CombinedImpedanceController::jointTrajectoryCallback(
     }
   }
 
-  // Reject trajectory if not in JOINT_TRAJECTORY mode
-  {
-    std::lock_guard<std::mutex> lock(m_traj_mutex);
-    if (m_control_mode.load() != ControlMode::JOINT_TRAJECTORY) {
-      RCLCPP_WARN(get_node()->get_logger(),
-                  "CombinedImpedanceController: Trajectory rejected "
-                  "-- not in JOINT_TRAJECTORY mode.");
-      return;
-    }
-  }
-
-  // Build an index map from this controller's joints to the message joints.
-  // For each joint in controller_joint_names we find the matching index in
-  // msg->joint_names so we can extract the correct positions.
-  const auto controller_joint_names = Base::m_joint_names;
-  std::vector<int> msg_index_for_controller_joint(Base::m_joint_number, -1);
-  for (size_t i = 0; i < controller_joint_names.size(); ++i) {
-    for (size_t j = 0; j < msg->joint_names.size(); ++j) {
-      if (msg->joint_names[j] == controller_joint_names[i]) {
-        msg_index_for_controller_joint[i] = static_cast<int>(j);
-        break;
+  // Build the controller_joint[i] -> msg->joint_names index map once on the
+  // first non-empty trajectory. Subsequent messages are assumed to carry the
+  // same joint ordering (matches ROS1 behavior gated by joint_indices_built_).
+  if (!m_joint_indices_built) {
+    const auto &controller_joint_names = Base::m_joint_names;
+    std::vector<int> indices(Base::m_joint_number, -1);
+    for (size_t i = 0; i < controller_joint_names.size(); ++i) {
+      for (size_t j = 0; j < msg->joint_names.size(); ++j) {
+        if (msg->joint_names[j] == controller_joint_names[i]) {
+          indices[i] = static_cast<int>(j);
+          break;
+        }
+      }
+      if (indices[i] < 0) {
+        RCLCPP_WARN(get_node()->get_logger(),
+                    "CombinedImpedanceController: Joint '%s' not found in "
+                    "trajectory message. Ignoring trajectory.",
+                    controller_joint_names[i].c_str());
+        return;
       }
     }
-    if (msg_index_for_controller_joint[i] < 0) {
-      RCLCPP_WARN(get_node()->get_logger(),
-                  "CombinedImpedanceController: Joint '%s' not found in "
-                  "trajectory message. Ignoring trajectory.",
-                  controller_joint_names[i].c_str());
-      return;
-    }
+    m_msg_index_for_controller_joint = std::move(indices);
+    m_joint_indices_built = true;
+    RCLCPP_INFO(get_node()->get_logger(),
+                "CombinedImpedanceController: Joint index mapping built.");
   }
 
-  std::lock_guard<std::mutex> lock(m_traj_mutex);
-  const size_t n = msg->points.size();
-  m_traj_positions.resize(n);
-  m_traj_velocities.resize(n);
-  m_traj_times.resize(n);
-  for (size_t i = 0; i < n; ++i) {
-    const auto &pt = msg->points[i];
-
-    if (pt.positions.size() < msg->joint_names.size()) {
+  // Up-front validation: reject the whole message if any point is malformed,
+  // before touching the waypoint buffers. Avoids leaving the controller with
+  // half-resized buffers and m_traj_active=false as the previous version did.
+  for (size_t i = 0; i < msg->points.size(); ++i) {
+    if (msg->points[i].positions.size() < msg->joint_names.size()) {
       RCLCPP_WARN(get_node()->get_logger(),
                   "CombinedImpedanceController: Trajectory point %zu has "
                   "insufficient positions (%zu < %zu). Ignoring trajectory.",
-                  i, pt.positions.size(), msg->joint_names.size());
-      m_traj_active = false;
+                  i, msg->points[i].positions.size(),
+                  msg->joint_names.size());
       return;
-    }
-
-    const bool has_vel = pt.velocities.size() >= msg->joint_names.size();
-    m_traj_times[i] = rclcpp::Duration(pt.time_from_start).seconds();
-    m_traj_positions[i] = ctrl::VectorND::Zero(Base::m_joint_number);
-    m_traj_velocities[i] = ctrl::VectorND::Zero(Base::m_joint_number);
-    for (size_t j = 0; j < Base::m_joint_number; ++j) {
-      m_traj_positions[i](j) = pt.positions[msg_index_for_controller_joint[j]];
-      m_traj_velocities[i](j) =
-          has_vel ? pt.velocities[msg_index_for_controller_joint[j]] : 0.0;
     }
   }
 
-  // Seed desired positions from the ACTUAL robot state rather than from
-  // m_traj_positions[0]. m_traj_positions[0] comes from the Python-side
-  // joint-state snapshot which was taken several milliseconds before this
-  // callback fires (planning time + bridge latency). Seeding from the live
-  // hardware state guarantees zero initial PD error, eliminating the torque
-  // spike (and resulting jerk) that would otherwise scale with the P gain.
-  m_desired_joint_positions = Base::m_joint_positions.data;
-  m_desired_joint_velocities = ctrl::VectorND::Zero(Base::m_joint_number);
-  m_traj_elapsed = 0.0;
-  m_traj_active = true;
-  m_last_accepted_traj_stamp = rclcpp::Time(msg->header.stamp);
+  bool did_mode_switch = false;
+  {
+    std::lock_guard<std::mutex> lock(m_traj_mutex);
+
+    // Atomic CARTESIAN -> JOINT_TRAJECTORY switch on the first trajectory
+    // while in CARTESIAN mode, mirroring the ROS1 in-callback switch. Uses
+    // the same blend-from-last-task-torque pattern as modeSwitchCallback.
+    if (m_control_mode.load() == ControlMode::CARTESIAN) {
+      m_blend_tau_ff = m_last_tau_task;
+      m_blend_elapsed = 0.0;
+      m_blend_active = true;
+      freezeDesiredPoses();
+      m_control_mode.store(ControlMode::JOINT_TRAJECTORY);
+      did_mode_switch = true;
+      RCLCPP_INFO(get_node()->get_logger(),
+                  "CombinedImpedanceController: Switched to JOINT_TRAJECTORY "
+                  "(via trajectory, blend active).");
+    }
+
+    const size_t n = msg->points.size();
+    m_traj_positions.resize(n);
+    m_traj_velocities.resize(n);
+    m_traj_times.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+      const auto &pt = msg->points[i];
+      const bool has_vel = pt.velocities.size() >= msg->joint_names.size();
+      m_traj_times[i] = rclcpp::Duration(pt.time_from_start).seconds();
+      m_traj_positions[i] = ctrl::VectorND::Zero(Base::m_joint_number);
+      m_traj_velocities[i] = ctrl::VectorND::Zero(Base::m_joint_number);
+      for (size_t j = 0; j < Base::m_joint_number; ++j) {
+        m_traj_positions[i](j) =
+            pt.positions[m_msg_index_for_controller_joint[j]];
+        m_traj_velocities[i](j) =
+            has_vel ? pt.velocities[m_msg_index_for_controller_joint[j]] : 0.0;
+      }
+    }
+
+    // Seed desired positions from the ACTUAL robot state rather than from
+    // m_traj_positions[0]. m_traj_positions[0] comes from the Python-side
+    // joint-state snapshot which was taken several milliseconds before this
+    // callback fires (planning time + bridge latency). Seeding from the live
+    // hardware state guarantees zero initial PD error, eliminating the torque
+    // spike (and resulting jerk) that would otherwise scale with the P gain.
+    m_desired_joint_positions = Base::m_joint_positions.data;
+    m_desired_joint_velocities = ctrl::VectorND::Zero(Base::m_joint_number);
+    m_traj_elapsed = 0.0;
+    m_traj_active = true;
+    m_last_accepted_traj_stamp = rclcpp::Time(msg->header.stamp);
+  }
+
+  // Start the watchdog clock (m_traj_mutex released first to respect the
+  // m_mode_heartbeat_mutex-before-m_traj_mutex ordering used elsewhere).
+  if (did_mode_switch) {
+    std::lock_guard<std::mutex> hb_lock(m_mode_heartbeat_mutex);
+    m_last_mode_heartbeat_time = get_node()->get_clock()->now();
+    m_mode_heartbeat_received.store(true);
+  }
 
   RCLCPP_INFO(get_node()->get_logger(),
               "CombinedImpedanceController: Accepted trajectory with %zu "

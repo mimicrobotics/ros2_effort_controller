@@ -194,6 +194,10 @@ private:
   /// Stamp of the last accepted trajectory, used to dedup Python-side retries
   /// that republish the same trajectory when an ack is delayed.
   rclcpp::Time m_last_accepted_traj_stamp{0, 0, RCL_ROS_TIME};
+  /// Cached mapping controller_joint[i] -> msg->joint_names index, built once
+  /// on the first non-empty trajectory and reused on subsequent messages.
+  bool m_joint_indices_built{false};
+  std::vector<int> m_msg_index_for_controller_joint;
   static constexpr double kModeHeartbeatTimeout{0.3}; ///< 300ms watchdog.
 
 #if LOGGING
