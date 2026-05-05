@@ -312,14 +312,6 @@ CombinedImpedanceController::on_configure(
       get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
           get_node()->get_name() + std::string("/data_impedance"), 1);
 
-  // Service for controller mode switching (replaces topic-based mode command)
-  m_mode_switch_srv = get_node()->create_service<std_srvs::srv::SetBool>(
-      get_node()->get_name() + std::string("/controller_mode_switch"),
-      std::bind(&CombinedImpedanceController::modeSwitchCallback, this,
-                std::placeholders::_1, std::placeholders::_2));
-  RCLCPP_INFO(get_node()->get_logger(),
-              "CombinedImpedanceController: Mode switch service ready.");
-
   // Heartbeat subscriber for JOINT_TRAJECTORY watchdog
   m_mode_heartbeat_sub = get_node()->create_subscription<std_msgs::msg::Empty>(
       std::string("/mode_heartbeat"), 1,
@@ -1271,63 +1263,6 @@ void CombinedImpedanceController::targetFrameCallback(
   m_target_frame = frame;
 }
 
-// was silently discarded.
-void CombinedImpedanceController::modeSwitchCallback(
-    std_srvs::srv::SetBool::Request::SharedPtr req,
-    std_srvs::srv::SetBool::Response::SharedPtr res) {
-
-  // Lock ordering: always m_mode_heartbeat_mutex before m_traj_mutex (or
-  // acquire them sequentially, never nest the other way) to match the
-  // ordering in computeTorque() and avoid deadlocks.
-
-  if (req->data) {
-    {
-      std::lock_guard<std::mutex> lock(m_traj_mutex);
-      // Request JOINT_TRAJECTORY
-      if (m_control_mode.load() == ControlMode::JOINT_TRAJECTORY) {
-        res->success = true;
-        res->message = "Already in JOINT_TRAJECTORY mode.";
-        RCLCPP_INFO(get_node()->get_logger(), "modeSwitchCallback done.");
-        return;
-      }
-      m_blend_tau_ff = m_last_tau_task;
-      RCLCPP_INFO_STREAM(get_node()->get_logger(),
-                         "m_last_tau_task: " << m_last_tau_task.transpose()
-                                             << "\n");
-      m_blend_elapsed = 0.0;
-      m_blend_active = true;
-      m_traj_active =
-          false; // No trajectory yet -- just holding current position.
-      freezeDesiredPoses();
-      // Switch CARTESIAN -> JOINT_TRAJECTORY
-      m_control_mode.store(ControlMode::JOINT_TRAJECTORY);
-    }
-    // Start the watchdog clock (m_traj_mutex released first to respect
-    // ordering).
-    {
-      std::lock_guard<std::mutex> hb_lock(m_mode_heartbeat_mutex);
-      m_last_mode_heartbeat_time = get_node()->get_clock()->now();
-      m_mode_heartbeat_received.store(true);
-    }
-    RCLCPP_INFO(get_node()->get_logger(),
-                "CombinedImpedanceController: Switched to JOINT_TRAJECTORY "
-                "mode (via service).");
-    res->success = true;
-    res->message = "Switched to JOINT_TRAJECTORY mode.";
-  } else {
-    std::lock_guard<std::mutex> lock(m_traj_mutex);
-    // Switch JOINT -> CARTESIAN
-    m_control_mode.store(ControlMode::CARTESIAN);
-    m_mode_heartbeat_received.store(false);
-    RCLCPP_INFO(get_node()->get_logger(),
-                "CombinedImpedanceController: Switched to CARTESIAN mode "
-                "(via service).");
-    freezeDesiredPoses();
-    res->success = true;
-    res->message = "Switched to CARTESIAN mode.";
-  }
-}
-
 void CombinedImpedanceController::jointTrajectoryCallback(
     const trajectory_msgs::msg::JointTrajectory::SharedPtr msg) {
   // Empty trajectory = cancel active trajectory and revert to CARTESIAN
@@ -1404,8 +1339,8 @@ void CombinedImpedanceController::jointTrajectoryCallback(
     std::lock_guard<std::mutex> lock(m_traj_mutex);
 
     // Atomic CARTESIAN -> JOINT_TRAJECTORY switch on the first trajectory
-    // while in CARTESIAN mode, mirroring the ROS1 in-callback switch. Uses
-    // the same blend-from-last-task-torque pattern as modeSwitchCallback.
+    // while in CARTESIAN mode, mirroring the ROS1 in-callback switch. Blends
+    // the last task torque to avoid a torque step on the transition.
     if (m_control_mode.load() == ControlMode::CARTESIAN) {
       m_blend_tau_ff = m_last_tau_task;
       m_blend_elapsed = 0.0;

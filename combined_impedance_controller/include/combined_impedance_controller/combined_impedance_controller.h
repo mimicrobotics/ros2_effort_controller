@@ -19,7 +19,6 @@
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/int32.hpp>
-#include <std_srvs/srv/set_bool.hpp>
 
 #include "combined_impedance_controller/robot_monitor.h"
 
@@ -171,11 +170,6 @@ private:
   std::atomic<bool> m_debug_thread_running{false};
   std::thread m_debug_thread;
   void debugPublishLoop();
-
-  // Controller mode service
-  rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr m_mode_switch_srv;
-  void modeSwitchCallback(std_srvs::srv::SetBool::Request::SharedPtr req,
-                          std_srvs::srv::SetBool::Response::SharedPtr res);
 
   // Mode heartbeat (received from Python while in JOINT_TRAJECTORY)
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr m_mode_heartbeat_sub;

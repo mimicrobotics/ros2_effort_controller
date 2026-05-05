@@ -6,7 +6,7 @@ Built on top of `effort_controller_base` and loaded as a `controller_interface::
 
 ## Control Modes
 
-The controller operates in two mutually exclusive modes, switchable at runtime via a service call:
+The controller operates in two mutually exclusive modes. It enters JOINT_TRAJECTORY automatically on the first non-empty trajectory published to `/target_joint_trajectory`, and reverts to CARTESIAN on an empty trajectory or when the `/mode_heartbeat` watchdog times out (300 ms):
 
 | Mode | Description |
 |------|-------------|
@@ -46,12 +46,6 @@ When `debug_topics` is enabled, additional topics are published:
 | `~/debug_orientation_error_angle` | `std_msgs/Float64` | Orientation error magnitude |
 | `~/debug_tau` | `std_msgs/Float64MultiArray` | Commanded joint torques |
 | `~/debug_control_mode` | `std_msgs/Int32` | Active control mode (0 = CARTESIAN, 1 = JOINT_TRAJECTORY) |
-
-## Services
-
-| Service | Type | Description |
-|---------|------|-------------|
-| `~/controller_mode_switch` | `std_srvs/SetBool` | `true` switches to JOINT_TRAJECTORY, `false` switches to CARTESIAN |
 
 ## Parameters
 
