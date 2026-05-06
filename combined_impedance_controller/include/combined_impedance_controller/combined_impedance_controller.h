@@ -16,6 +16,7 @@
 #include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/int32.hpp>
@@ -177,6 +178,23 @@ private:
   rclcpp::Time m_last_mode_heartbeat_time;
   std::mutex m_mode_heartbeat_mutex;
   std::atomic<bool> m_mode_heartbeat_received{false};
+
+  // External safety freeze (driven by dual_arm_coordinator when any arm in
+  // the dual-arm pair becomes unsafe). While true, the controller forces
+  // CARTESIAN mode, freezes the target frame, and rejects new target frames
+  // and non-empty trajectories until the freeze is released.
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr m_safety_freeze_sub;
+  void safetyFreezeCallback(const std_msgs::msg::Bool::SharedPtr msg);
+  void engageSafetyFreeze(); ///< Cancel traj, force CARTESIAN, freeze poses.
+  std::atomic<bool> m_safety_frozen{false};
+
+  // Heartbeat watchdog on the safety_freeze topic: the coordinator publishes
+  // its current state every safety_tick, so silence implies the coordinator
+  // died. m_safety_freeze_heartbeat_timeout==0 disables the watchdog (used
+  // by single-arm setups that have no coordinator).
+  rclcpp::Time m_last_safety_freeze_time;
+  std::mutex m_safety_freeze_mutex;
+  double m_safety_freeze_heartbeat_timeout{0.0};
 
   // Trajectory execution state
   std::vector<ctrl::VectorND> m_traj_positions;

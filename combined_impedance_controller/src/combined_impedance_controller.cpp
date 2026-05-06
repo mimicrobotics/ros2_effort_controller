@@ -82,6 +82,20 @@ CombinedImpedanceController::on_init() {
   auto_declare<std::string>("ur_program_name", "ext_control.urp");
   auto_declare<std::string>("dashboard_prefix", "/dashboard_client");
 
+  // Trajectory subscriber topic. Default is the global topic for single-arm
+  // setups; the dual_arm_coordinator routes per-arm trajectories on a
+  // namespaced topic (e.g. /<arm>/target_joint_trajectory) and configures this
+  // parameter accordingly.
+  auto_declare<std::string>("target_joint_trajectory_topic",
+                            "/target_joint_trajectory");
+
+  // Watchdog timeout (seconds) on incoming safety_freeze messages. The
+  // dual_arm_coordinator publishes this topic every safety tick; if the
+  // controller goes longer than this without receiving one, it freezes
+  // locally on the assumption that the coordinator died. 0 = disabled
+  // (single-arm setups that have no coordinator).
+  auto_declare<double>("safety_freeze_heartbeat_timeout", 0.0);
+
   m_robot_monitor = std::make_unique<UrRobotMonitor>(get_node());
 
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
@@ -296,9 +310,13 @@ CombinedImpedanceController::on_configure(
           std::bind(&CombinedImpedanceController::targetFrameCallback, this,
                     std::placeholders::_1));
 
+  const std::string target_joint_trajectory_topic =
+      get_node()
+          ->get_parameter("target_joint_trajectory_topic")
+          .as_string();
   m_target_joint_trajectory_subscriber =
       get_node()->create_subscription<trajectory_msgs::msg::JointTrajectory>(
-          std::string("/target_joint_trajectory"), 1,
+          target_joint_trajectory_topic, 1,
           std::bind(&CombinedImpedanceController::jointTrajectoryCallback, this,
                     std::placeholders::_1));
 
@@ -317,6 +335,27 @@ CombinedImpedanceController::on_configure(
       std::string("/mode_heartbeat"), 1,
       std::bind(&CombinedImpedanceController::modeHeartbeatCallback, this,
                 std::placeholders::_1));
+
+  // External safety freeze (asserted by dual_arm_coordinator when any arm
+  // in the pair is unsafe). Topic name follows the same per-arm convention
+  // as ~/robot_mode and ~/trajectory_ack.
+  m_safety_freeze_sub = get_node()->create_subscription<std_msgs::msg::Bool>(
+      get_node()->get_name() + std::string("/safety_freeze"), 1,
+      std::bind(&CombinedImpedanceController::safetyFreezeCallback, this,
+                std::placeholders::_1));
+
+  m_safety_freeze_heartbeat_timeout =
+      get_node()
+          ->get_parameter("safety_freeze_heartbeat_timeout")
+          .as_double();
+  if (m_safety_freeze_heartbeat_timeout > 0.0) {
+    RCLCPP_INFO(get_node()->get_logger(),
+                "Safety freeze heartbeat watchdog enabled, timeout=%.3fs",
+                m_safety_freeze_heartbeat_timeout);
+  } else {
+    RCLCPP_INFO(get_node()->get_logger(),
+                "Safety freeze heartbeat watchdog disabled.");
+  }
 
   // Get debug topics parameter and create publishers
   m_debug_topics = get_node()->get_parameter("debug_topics").as_bool();
@@ -428,6 +467,13 @@ CombinedImpedanceController::on_activate(
   // Default to cartesian mode on activation
   m_control_mode.store(ControlMode::CARTESIAN);
 
+  // Seed the safety-freeze heartbeat watchdog so the coordinator gets one
+  // full timeout window to start publishing before the watchdog can fire.
+  {
+    std::lock_guard<std::mutex> lk(m_safety_freeze_mutex);
+    m_last_safety_freeze_time = get_node()->get_clock()->now();
+  }
+
   // Start async debug publish thread if debug topics are enabled
   if (m_debug_topics && !m_debug_thread_running.load()) {
     m_debug_thread_running.store(true);
@@ -501,6 +547,28 @@ CombinedImpedanceController::update(const rclcpp::Time &time,
     auto t1 = clock::now();
     m_timing_monitor_update.record(
         std::chrono::duration<double, std::micro>(t1 - t0).count());
+  }
+
+  // Safety-freeze heartbeat watchdog: if enabled and we haven't seen a
+  // message from the coordinator within the timeout, engage freeze. The
+  // freeze is released the next time a message arrives with data=false.
+  if (m_safety_freeze_heartbeat_timeout > 0.0 && !m_safety_frozen.load()) {
+    rclcpp::Time last_time;
+    {
+      std::lock_guard<std::mutex> lk(m_safety_freeze_mutex);
+      last_time = m_last_safety_freeze_time;
+    }
+    const double elapsed =
+        (get_node()->get_clock()->now() - last_time).seconds();
+    if (elapsed > m_safety_freeze_heartbeat_timeout) {
+      m_safety_frozen.store(true);
+      engageSafetyFreeze();
+      RCLCPP_ERROR_THROTTLE(
+          get_node()->get_logger(), *get_node()->get_clock(), 2000,
+          "Safety freeze heartbeat timed out (%.3fs > %.3fs); engaging "
+          "local freeze. Coordinator may be down.",
+          elapsed, m_safety_freeze_heartbeat_timeout);
+    }
   }
 
   {
@@ -1221,6 +1289,9 @@ void CombinedImpedanceController::ftSensorWrenchCallback(
 
 void CombinedImpedanceController::targetFrameCallback(
     const geometry_msgs::msg::PoseStamped::SharedPtr target) {
+  if (m_safety_frozen.load()) {
+    return; // Coordinator-asserted freeze: hold the frozen target frame.
+  }
   if (m_robot_monitor->controllerState() !=
       RobotMonitor::ControllerState::RUNNING) {
     return; // Don't accept new poses while in a non-normal state
@@ -1278,6 +1349,14 @@ void CombinedImpedanceController::jointTrajectoryCallback(
     RCLCPP_INFO(get_node()->get_logger(),
                 "CombinedImpedanceController: Empty trajectory, switched to "
                 "CARTESIAN.");
+    return;
+  }
+
+  if (m_safety_frozen.load()) {
+    RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(),
+                         2000,
+                         "CombinedImpedanceController: Dropping trajectory; "
+                         "coordinator safety freeze is asserted.");
     return;
   }
 
@@ -1406,6 +1485,44 @@ void CombinedImpedanceController::modeHeartbeatCallback(
 
   if (!m_mode_heartbeat_received.load()) {
     m_mode_heartbeat_received.store(true);
+  }
+}
+
+void CombinedImpedanceController::engageSafetyFreeze() {
+  // Mirror the empty-trajectory path: cancel any active trajectory, drop
+  // the blend, force CARTESIAN, and freeze the impedance target. This
+  // works the same whether we were in CARTESIAN or JOINT_TRAJECTORY.
+  std::lock_guard<std::mutex> lock(m_traj_mutex);
+  m_traj_active = false;
+  m_blend_active = false;
+  m_mode_heartbeat_received.store(false);
+  m_control_mode.store(ControlMode::CARTESIAN);
+  freezeDesiredPoses();
+}
+
+void CombinedImpedanceController::safetyFreezeCallback(
+    const std_msgs::msg::Bool::SharedPtr msg) {
+  // Refresh the watchdog timestamp on every receive — even idempotent
+  // republishes count as liveness.
+  {
+    std::lock_guard<std::mutex> lk(m_safety_freeze_mutex);
+    m_last_safety_freeze_time = get_node()->get_clock()->now();
+  }
+
+  const bool want_freeze = msg->data;
+  const bool was_frozen = m_safety_frozen.exchange(want_freeze);
+  if (want_freeze == was_frozen) {
+    return; // Idempotent: coordinator may republish the same state.
+  }
+
+  if (want_freeze) {
+    engageSafetyFreeze();
+    RCLCPP_WARN(get_node()->get_logger(),
+                "CombinedImpedanceController: Safety freeze asserted by "
+                "coordinator; holding current pose.");
+  } else {
+    RCLCPP_INFO(get_node()->get_logger(),
+                "CombinedImpedanceController: Safety freeze released.");
   }
 }
 

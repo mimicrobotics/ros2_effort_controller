@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
@@ -25,6 +26,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr ack_sub;
     rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
         traj_pub;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr safety_freeze_pub;
     int32_t robot_mode{0};
     bool robot_mode_seen{false};
     bool acked_current{false};
@@ -37,7 +39,7 @@ private:
 
   bool armSafe(const ArmState &arm) const;
   bool allArmsSafe() const;
-  void publishFreezeToAll();
+  void publishSafetyFreeze(bool freeze);
 
   std::vector<ArmState> arms_;
   std::unordered_set<int32_t> safe_robot_modes_;
@@ -50,6 +52,7 @@ private:
   void safetyTick();
 
   bool trajectory_in_flight_{false};
+  bool safety_frozen_{false};
 };
 
 } // namespace dual_arm_coordinator

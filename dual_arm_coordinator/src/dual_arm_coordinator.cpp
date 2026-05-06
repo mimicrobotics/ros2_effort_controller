@@ -56,6 +56,9 @@ DualArmCoordinator::DualArmCoordinator(const rclcpp::NodeOptions &options)
     arm.traj_pub = create_publisher<trajectory_msgs::msg::JointTrajectory>(
         joinedTopic(arm.ns, "target_joint_trajectory"), 1);
 
+    arm.safety_freeze_pub = create_publisher<std_msgs::msg::Bool>(
+        joinedTopic(arm.ns, "safety_freeze"), 1);
+
     arm.robot_mode_sub = create_subscription<std_msgs::msg::Int32>(
         joinedTopic(arm.ns, "robot_mode"), 10,
         [this, i](const std_msgs::msg::Int32::SharedPtr msg) {
@@ -101,12 +104,11 @@ bool DualArmCoordinator::allArmsSafe() const {
                      [this](const ArmState &a) { return armSafe(a); });
 }
 
-void DualArmCoordinator::publishFreezeToAll() {
-  trajectory_msgs::msg::JointTrajectory empty;
-  empty.header.stamp = now();
+void DualArmCoordinator::publishSafetyFreeze(bool freeze) {
+  std_msgs::msg::Bool msg;
+  msg.data = freeze;
   for (auto &arm : arms_) {
-    arm.traj_pub->publish(empty);
-    arm.acked_current = false;
+    arm.safety_freeze_pub->publish(msg);
   }
 }
 
@@ -183,17 +185,37 @@ void DualArmCoordinator::onArmAck(
 }
 
 void DualArmCoordinator::safetyTick() {
-  if (!trajectory_in_flight_) {
-    return;
+  const bool all_safe = allArmsSafe();
+  if (!all_safe && !safety_frozen_) {
+    // Any arm leaving the safe set freezes the whole pair, regardless of
+    // whether a JOINT_TRAJECTORY is in flight or arms are in CARTESIAN. The
+    // controller-side freeze cancels any active trajectory and rejects new
+    // target frames, so no separate empty-trajectory publish is needed.
+    std::string detail;
+    for (const auto &arm : arms_) {
+      detail += " " + arm.ns + "=" +
+                (arm.robot_mode_seen ? std::to_string(arm.robot_mode)
+                                     : std::string("?"));
+    }
+    RCLCPP_WARN(get_logger(),
+                "An arm left the safe set; asserting safety freeze on all "
+                "arms. modes:%s",
+                detail.c_str());
+    safety_frozen_ = true;
+    trajectory_in_flight_ = false;
+    for (auto &arm : arms_) {
+      arm.acked_current = false;
+    }
+  } else if (all_safe && safety_frozen_) {
+    RCLCPP_INFO(get_logger(),
+                "All arms back in the safe set; releasing safety freeze.");
+    safety_frozen_ = false;
   }
-  if (allArmsSafe()) {
-    return;
-  }
-  RCLCPP_WARN(get_logger(),
-              "Mid-execution safety cutoff: an arm left the safe set; "
-              "publishing empty trajectory to all arms.");
-  publishFreezeToAll();
-  trajectory_in_flight_ = false;
+
+  // Always publish current freeze state — this doubles as a liveness
+  // heartbeat. The controller-side watchdog freezes locally if these
+  // messages stop arriving (e.g. coordinator crashed).
+  publishSafetyFreeze(safety_frozen_);
 }
 
 } // namespace dual_arm_coordinator
