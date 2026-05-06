@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>dual_arm_coordinator</name>
+  <version>0.0.0</version>
+  <description>Coordinator node that fans a single combined JointTrajectory out to two CombinedImpedanceController instances and aggregates their acks, gating the forward on per-arm robot_mode safety.</description>
+  <maintainer email="robotics.team@mimicrobotics.com">Mimic Robotics</maintainer>
+  <license>BSD</license>
+  <url type="repository">https://github.com/mimicrobotics/ros2_effort_controller</url>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>trajectory_msgs</depend>
+
+  <exec_depend>ros2launch</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

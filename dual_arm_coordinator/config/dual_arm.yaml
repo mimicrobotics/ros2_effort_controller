@@ -1,0 +1,22 @@
+dual_arm_coordinator:
+  ros__parameters:
+    # Per-arm namespaces. Each must match the controller_name (or ns) under
+    # which a CombinedImpedanceController publishes <ns>/robot_mode and
+    # <ns>/trajectory_ack and subscribes to <ns>/target_joint_trajectory.
+    arms:
+      - left_arm
+      - right_arm
+
+    # Upstream topic where the planner publishes one combined JointTrajectory
+    # containing joint_names for both arms.
+    combined_trajectory_topic: /target_joint_trajectory
+
+    # Aggregated ack emitted after all arms have acked.
+    combined_ack_topic: /trajectory_ack
+
+    # MimicRobotMode values that count as "safe to start a trajectory".
+    # 1 = IDLE, 2 = MOVE (see RobotMonitor::MimicRobotMode).
+    safe_robot_modes: [1, 2]
+
+    # Period of the mid-execution safety check (ms).
+    safety_tick_period_ms: 50
